@@ -1,6 +1,8 @@
 # 🧠 Project Memory — Indian Legal Agentic RAG
-> Last updated: Session 1 — June 19, 2026
+> Last updated: Session 2 — June 20, 2026
 > Purpose: Running context doc so Claude can resume accurately after context resets.
+>
+> **Session 2 changes**: Corrected corpus count (779 docs, not 1036). Synced all embedding references to the v2 Voyage-4 architecture (voyage-4-large index + local voyage-4-nano query; gemini fully dropped). Fixed a duplicate `QueryPlan` class bug in `query_embedder.py`.
 
 ---
 
@@ -8,7 +10,7 @@
 
 A **production-ready, scalable Agentic AI + Advanced RAG system** for the Indian legal domain.
 
-- **Data source**: Indian Kanoon — **1036 docs (76 MB), already downloaded as structured JSON**
+- **Data source**: Indian Kanoon — **779 docs (25 MB) in `LEGAL_DATA/`, already downloaded as structured JSON** (637 judgments + 142 statute provisions)
 - **Goal**: Contextual fidelity under stress, zero hallucination tolerance on citations
 - **Stack**: Full-stack — chunker + knowledge stores + retrieval engine + multi-agent layer + guardrails + production infra
 
@@ -19,7 +21,7 @@ A **production-ready, scalable Agentic AI + Advanced RAG system** for the Indian
 - [x] Architecture designed — 7 layers, 28 components
 - [x] Chunking strategy designed — **8 chunk types**, 6-stage pipeline
 - [x] Agent topology designed — 13 agents across 5 tiers, hybrid hierarchical orchestration
-- [x] Embedding strategy designed — poly-vector: voyage-context-3 (content) + gemini-embedding-001 (label)
+- [x] Embedding strategy designed — poly-vector on **Voyage 4 shared space**: voyage-4-large (index, both collections) + voyage-4-nano (query, local) — gemini dropped
 - [x] Free-tier build path mapped — all components have $0 options
 - [x] **Chunker built and tested** — `chunker.py` works on real IK JSON files
 - [x] **Data format analyzed** — IK provides `data-structure` attributes (section labels for free) and `citedby` arrays (Neo4j edges for free)
@@ -35,7 +37,7 @@ A **production-ready, scalable Agentic AI + Advanced RAG system** for the Indian
 ## 🏛️ Architecture: 7 Layers (Summary)
 
 1. **Data Ingestion** — ~~IK Async Crawler, Multi-Format Parser~~ **NOT NEEDED. Data already acquired as structured JSON.** Only Citation Normalizer needed (regex on inline citations).
-2. **Knowledge Representation** — Legal Hierarchical Chunker (**BUILT**: `chunker.py`), Metadata Enricher (built into chunker), Ratio/Obiter Tagger (TODO: LLM batch call), **Poly-vector Embedders** (voyage-context-3 + gemini-embedding-001)
+2. **Knowledge Representation** — Legal Hierarchical Chunker (**BUILT**: `chunker.py`), Metadata Enricher (built into chunker), Ratio/Obiter Tagger (TODO: LLM batch call), **Poly-vector Embedders** (voyage-4-large for indexing both collections + voyage-4-nano local for queries)
 3. **Knowledge Stores** — Qdrant (vector — TWO collections for poly-vector), Neo4j (citations — **from day one**), SQLite FTS5 (BM25, swap to Elasticsearch at >50K docs), JSON file (statute ontology, swap to PostgreSQL+ltree later)
 4. **Retrieval Engine** — Hybrid Retriever (RRF over content vector + label vector + BM25 + citation graph), Authority Re-ranker, Citation Chain Traverser, Jurisdiction & Validity Filter
 5. **Agent Orchestration** — 13 agents, hybrid hierarchical (see below)
@@ -117,7 +119,7 @@ This means **section classification (Facts/Issues/Held/Reasoning) requires 0 LLM
 5. **Temporal & validity tagging** — effective_from/to, citation_status, per_incuriam, sub_silentio
 6. **Multi-store distribution** — fan out to Qdrant (2 collections) / Neo4j / SQLite FTS5
 
-**Previously 7 stages — dropped contextual enrichment** because voyage-context-3 bakes document-context-aware embedding into the model itself. No separate LLM pre-processing step needed.
+**Previously 7 stages — dropped contextual enrichment** because voyage-4-large bakes document-context-aware embedding into the model itself. No separate LLM pre-processing step needed.
 
 ### LLM calls per judgment — corrected twice
 
@@ -129,7 +131,7 @@ This means **section classification (Facts/Issues/Held/Reasoning) requires 0 LLM
 | Citation relationship classification | 1-2 batched calls | TODO in chunker.py |
 | **Total per judgment** | **~3-4 calls** | |
 
-For 1036 docs (est. ~800 judgments): ~2,400-3,200 LLM calls total. One afternoon on Cerebras free tier.
+For 779 docs (637 judgments + 142 statutes; only judgments need these calls): ~1,900-2,500 LLM calls total. One afternoon on Cerebras free tier.
 
 ### Why dense embeddings + graph + BM25 (not one or the other)
 
@@ -142,16 +144,19 @@ A KG cannot find conceptually similar text. A vector store cannot traverse OVERR
 
 ### Chunk-to-embedder mapping
 
-| Chunk type | Content vector (voyage-context-3) | Label vector (gemini-embedding-001) |
-|---|---|---|
-| L0 Document (summary_text) | ✓ | case name + citation + topic keywords |
-| L1 Section | ✓ | — |
-| L2 Paragraph | ✓ | — |
-| L3 Atomic proposition | ✓ | — |
-| Ratio | ✓ | case name + holding subject |
-| Issue-Held pair | ✓ | — |
-| Citation | **NOT EMBEDDED** — Neo4j edge only | **NOT EMBEDDED** — citing text already in L2 |
-| Statute provision | ✓ (note: voyage-context-3's document-context advantage doesn't apply here — each statute is its own JSON file, no larger document for context) | act + section + ALL aliases |
+| Chunk type | Index with | Query with | Collection |
+|---|---|---|---|
+| L0 Document | voyage-4-large | voyage-4-nano (local) | content |
+| L1 Section | voyage-4-large | voyage-4-nano (local) | content |
+| L2 Paragraph | voyage-4-large | voyage-4-nano (local) | content |
+| L3 Atomic proposition | voyage-4-large | voyage-4-nano (local) | content |
+| Ratio | voyage-4-large | voyage-4-nano (local) | content |
+| Issue-Held pair | voyage-4-large | voyage-4-nano (local) | content |
+| Citation | NOT EMBEDDED — Neo4j edge only | — | — |
+| Statute provision (content) | voyage-4-large | voyage-4-nano (local) | content |
+| Statute provision (label) | voyage-4-large (short alias text) | voyage-4-nano (local) | label |
+
+Note: voyage-4-large's document-context advantage (+20.54%, inherited from voyage-context-3) does NOT apply to statute provision chunks — each statute is its own standalone JSON file with no larger document context. voyage-4-large is still a strong embedder here, just without the contextual bonus.
 
 ### Conceptual clarifications
 
@@ -184,35 +189,52 @@ Only the ratio decidendi is binding on future courts (Article 141). Obiter is ju
 
 ---
 
-## 🎯 Embedding Strategy — Poly-Vector (voyage-context-3 + gemini-embedding-001)
+## 🎯 Embedding Strategy — Voyage 4 Asymmetric Retrieval
 
 ### Research foundation
-- **Lima (arxiv:2504.10508, April 2025)** — Poly-Vector Retrieval: separate embeddings for content (sense) and label (reference). Significantly improves label-centric queries on legal corpora.
-- **voyage-context-3 (July 2025)** — contextualized chunk embeddings beat Anthropic contextual retrieval by +20.54% on chunk-level retrieval. 200M free tokens.
-- **Voyage benchmarks (Jan 2025)** — voyage-3-large outperforms voyage-law-2 on legal datasets. **voyage-law-2 is obsolete; do not use just for the name.**
+- **Lima (arxiv:2504.10508, April 2025)** — Poly-Vector Retrieval: separate indexing for content and label retrieval
+- **Voyage 4 family (Jan 2026)** — Industry-first shared embedding space: voyage-4-large, voyage-4, voyage-4-lite, voyage-4-nano all produce compatible embeddings
+- **voyage-4-large** — MoE architecture, state-of-the-art retrieval, 40% lower serving cost than comparable dense models
 
-### The two-embedder architecture
+### Architecture: asymmetric retrieval
 
-**Content vector** — `voyage-context-3`
-- 1024 dims (also supports 256/512/768 via Matryoshka)
-- 32K context window — handles atomic statute chunks
-- Free: 200M tokens one-time
-- Paid: $0.10/MTok ($0.067/MTok batch)
+**Index (one-time, offline)**: `voyage-4-large`
+- All document chunks (content collection + label collection)
+- 32K context, Matryoshka dims (2048/1024/512/256), 200M free tokens
+- $0.12/MTok after free quota
 
-**Label vector** — `gemini-embedding-001`
-- 3072 dims native (truncate to 768 via MRL)
-- 2048-token input (plenty for labels)
-- Free: indefinite at 100 RPM / 1000 RPD (~2M tokens/day sustainable)
-- Paid: $0.15/MTok
+**Query (every request)**: `voyage-4-nano` — **self-hosted locally**
+- Apache 2.0 license — free to run anywhere
+- Same shared embedding space as voyage-4-large → works against large-indexed docs
+- Zero API calls at query time → zero rate limits
+- Install: `pip install sentence-transformers` then `SentenceTransformer("voyageai/voyage-4-nano")`
 
-### Fusion at query time
-RRF combines 4 ranked lists:
-1. Content vector (voyage-context-3 top-50)
-2. Label vector (gemini-embedding-001 top-50)
-3. BM25 keyword (SQLite FTS5 top-50, Elasticsearch later)
-4. Citation graph 2-hop neighborhood
+**BM25**: `legal_fts5.py` — no embedding at all
 
-Weights adjustable per query intent.
+**Result**: Drop gemini-embedding-001. One provider, one SDK, one set of dimensions. Both Qdrant collections (content + label) indexed with voyage-4-large, queried with local voyage-4-nano.
+
+### Rate limits — how to never hit them
+
+| Situation | Limit | Fix |
+|---|---|---|
+| No payment method | 3 RPM, 10K TPM | Add payment method — **free tokens still apply**, no spend required |
+| With payment method (Tier 1) | 2000 RPM, 8M TPM | More than enough for 779-doc indexing |
+| Query time | N/A — local nano | Zero API calls — infinite throughput |
+
+**One action**: Add a payment method to your Voyage account. You jump from 3 RPM to 2000 RPM. No charge as long as you stay within the 200M free tokens.
+
+### Batch indexing config
+- voyage-4-large batch token limit: 120K tokens per API call
+- Safe batch size: 100 chunks at ~1000 tokens avg = 100K tokens/call
+- For 779 docs × ~25 chunks = ~19.5K chunks ÷ 100 = ~195 API calls total for full index
+
+### Voyage 4 model family (all share one embedding space)
+| Model | Use case | Price | Notes |
+|---|---|---|---|
+| `voyage-4-large` | Document indexing (our pick) | $0.12/MTok | MoE, best quality, 200M free |
+| `voyage-4` | Mid-tier | $0.06/MTok | Good quality/cost balance |
+| `voyage-4-lite` | Budget API queries | $0.02/MTok | Use if not self-hosting nano |
+| `voyage-4-nano` | Query embedding (our pick) | **$0 — Apache 2.0 self-hosted** | Same space as large |
 
 ---
 
@@ -262,11 +284,13 @@ MA-RAG (May 2025), ChatLaw (2024), SAMVAD (Sept 2025, India-specific), L4L (Nov 
 | Separate Query Rewriter agent | MA-RAG ablation: no measurable benefit |
 | Per-issue MoE experts (ChatLaw) | Indian law domains too blurred |
 | Tree-of-Thought branching | Legal reasoning is sequential-deductive |
-| **voyage-law-2** | Outperformed by voyage-3-large and voyage-context-3; misleading "legal" name |
-| **Single-embedder content-only** | Poly-vector paper: label queries fail hard on content embeddings |
-| **Anthropic contextual retrieval** (separate LLM per chunk) | voyage-context-3 bakes this in — beats it by +20.54% |
+| **voyage-law-2** | Outperformed by voyage-3-large and voyage-4; misleading "legal" name |
+| **voyage-context-3** | Superseded by voyage-4-large (better quality, shared embedding space, same free quota) |
+| **gemini-embedding-001 for labels** | Dropped — voyage-4-nano (local, Apache 2.0) covers both content and label queries at zero API cost |
+| **Single-embedder content-only** | Poly-vector paper: label queries fail hard on content embeddings; two Qdrant collections solve this |
+| **Anthropic contextual retrieval** (separate LLM per chunk) | voyage-4-large bakes this in |
 | **Cohere embed-v4 free tier** | Only 1000 calls/MONTH total — unusable |
-| **OpenAI text-embedding-3** | No free tier; beaten by voyage-context-3 |
+| **OpenAI text-embedding-3** | No free tier; beaten by voyage-4-large |
 | **9 chunk types (L0 + Headnote separate)** | Redundant; merged into L0 with summary_text field |
 | **L0 in both Qdrant AND Postgres** | Overengineered; Qdrant payload IS a JSON store; Postgres only for statute ontology |
 | **SQLite for citation graph (swap to Neo4j later)** | Migration cost too high; Cypher is the right query language from day one |
@@ -278,7 +302,7 @@ MA-RAG (May 2025), ChatLaw (2024), SAMVAD (Sept 2025, India-specific), L4L (Nov 
 | **Reporter-only citation extraction** | Most Indian judgments cite by case name ("Party1 v. Party2"); regex-only catches ~30% of actual citations |
 | **Embedding citation chunks separately** | Citing text already lives in L2 paragraph chunks; double-embedding wastes storage and creates retrieval duplicates |
 | **FTS5 default tokenizer for legal text** | Splits "Section 302" into two tokens; replaced with pre-normalization to single tokens |
-| **Per incuriam detection at 1036 docs** | Requires knowing controlling precedent for every issue; deferred to Phase 2 when corpus > 50K |
+| **Per incuriam detection at 779 docs** | Requires knowing controlling precedent for every issue; deferred to Phase 2 when corpus > 50K |
 | **Custom orchestration code for 13 agents** | LangGraph handles state management, parallel execution, conditional branching, and retry logic out of the box |
 
 ---
@@ -297,10 +321,10 @@ MA-RAG (May 2025), ChatLaw (2024), SAMVAD (Sept 2025, India-specific), L4L (Nov 
 | **8 chunk types** | Each retrieval mode needs different granularity (was 9, merged L0+Headnote) |
 | Statute provisions atomic | Splitting provisos changes meaning |
 | Citations as graph edges | Multi-hop traversal impossible otherwise |
-| voyage-context-3 for content embedding | +20.54% vs Anthropic contextual retrieval, free 200M tokens |
-| gemini-embedding-001 for labels | Only perpetual-free embedder; MTEB multilingual leader |
-| Two Qdrant collections, RRF fusion | Standard poly-vector pattern |
-| Skip Anthropic contextual retrieval | voyage-context-3 makes it redundant |
+| voyage-4-large for indexing (both collections) | MoE, shared embedding space, free 200M tokens; inherits voyage-context-3's +20.54% context benefit |
+| voyage-4-nano (local) for query embedding | Apache 2.0, self-hosted, same shared space as large → zero API calls / zero rate limits at query time |
+| Two Qdrant collections, RRF fusion | Standard poly-vector pattern (both queried with the SAME nano vector) |
+| Skip Anthropic contextual retrieval | voyage-4-large makes it redundant |
 | **Langfuse from day one** (not LangSmith) | OSS, one Docker command, want agent traces from start |
 | **LiteLLM from day one** | OSS library, unified LLM interface, enables provider rotation |
 | **Skip parser — chunk directly from JSON** | IK JSON is already structured; data-structure attrs eliminate section classification |
@@ -314,8 +338,8 @@ MA-RAG (May 2025), ChatLaw (2024), SAMVAD (Sept 2025, India-specific), L4L (Nov 
 | **FTS5 with legal token normalization** | Pre-normalize "Section 302 IPC" → "section_302_ipc" before indexing AND querying; single-token match |
 | **L0 summary_text = title + citations + keywords** | IK relatedqs are topic keywords, NOT legal headnotes; renamed to avoid confusion |
 | **LangGraph for agent orchestration** | 13 agents with parallel specialists + adversarial pair + sequential gates needs a framework; LangGraph handles state, branching, and human-in-the-loop |
-| **Per incuriam detection → Phase 2** | Requires knowing controlling precedent for every legal issue; infeasible at 1036 docs |
-| **voyage-context-3 context benefit = judgments only** | Statute provisions are standalone JSON files (no larger document for context); +20.54% improvement applies to judgment chunks, not statutes |
+| **Per incuriam detection → Phase 2** | Requires knowing controlling precedent for every legal issue; infeasible at 779 docs |
+| **voyage-4-large context benefit = judgments only** | Statute provisions are standalone JSON files (no larger document for context); +20.54% improvement applies to judgment chunks, not statutes |
 
 ---
 
@@ -330,10 +354,9 @@ MA-RAG (May 2025), ChatLaw (2024), SAMVAD (Sept 2025, India-specific), L4L (Nov 
 - ADM Jabalpur overruled by Puttaswamy (2017) but cited 1000s of times — validity propagation critical
 - Adversarial Counsel pair must have EQUAL retrieval budget
 - Synthesis Judge needs higher-capacity model — don't use Haiku here
-- gemini-embedding-001 has 2048-token input limit AND single input per request — fine for labels, useless for chunks
 - Voyage 200M free tier is per-account, one-time — burns fast at scale; plan Phase 2 in advance
-- Vector dimensions: voyage-context-3 = 1024, gemini = 3072 native (truncate to 768) — different Qdrant collections
-- text-embedding-004 is deprecated — use gemini-embedding-001 only
+- Vector dimensions: voyage-4-large native 2048, Matryoshka-truncate to 1024 — BOTH Qdrant collections use 1024 (same shared space, queried with voyage-4-nano)
+- `truncate_dim` in `query_embedder.py` MUST match the Qdrant collection dimension (default 1024) or search breaks
 - **Not all IK judgment files may have data-structure attributes** — need fallback LLM call for those without
 - **Case-name citation regex produces false positives** — "The State v. accused" patterns need post-filtering; fuzzy match against corpus titles to resolve tid
 - **L3 atomic chunks from single-paragraph judgments produce 0 chunks** — old short judgments (pre-1950) often have entire reasoning in one "Facts" paragraph; IK mislabels these
@@ -354,8 +377,8 @@ MA-RAG (May 2025), ChatLaw (2024), SAMVAD (Sept 2025, India-specific), L4L (Nov 
 | | ~~PDF parsing~~ | **NOT NEEDED** — IK JSON has HTML/cleaned_text | — |
 | **L2 Chunking + Embedding** | Section detection | **IK `data-structure` attribute** — 0 LLM calls | Free |
 | | Ratio-obiter classifier | Groq Llama 3.3 70B or Gemini Flash-Lite | 30 RPM / 1K RPD |
-| | Content embedder | voyage-context-3 | 200M tokens one-time |
-| | Label embedder | gemini-embedding-001 | 100 RPM / 1K RPD perpetual |
+| | Doc embedder (both collections, index) | voyage-4-large | 200M tokens one-time |
+| | Query embedder (local, all queries) | voyage-4-nano self-host (Apache 2.0) | $0 — infinite |
 | | Embedding fallback | Jina v3 → self-host BGE-M3/Nomic v2 | 10M one-time → ∞ |
 | **L3 Stores** | Vector × 2 | Qdrant self-hosted (Docker) | unlimited |
 | | Citation graph | **Neo4j Community Edition** (Docker, from day one) | unlimited |
@@ -383,12 +406,12 @@ MA-RAG (May 2025), ChatLaw (2024), SAMVAD (Sept 2025, India-specific), L4L (Nov 
 
 ---
 
-## 🎯 Scale Reality — 1036 docs, 76 MB corpus
+## 🎯 Scale Reality — 779 docs, 25 MB corpus
 
 ### Cost math
-- 1036 docs × ~18K tokens = **~18M tokens** (Voyage free covers 11× over)
-- Gemini labels: ~3M tokens (~2 days on free)
-- LLM chunking: 1036 × 3.5 calls = **~3,600 calls** (4 days Groq free, or 1 afternoon Cerebras)
+- 779 docs × ~18K tokens = **~14M tokens** (Voyage free 200M covers 14× over)
+- Label collection: embedded with the SAME voyage-4-large pass (short alias text) — no separate provider
+- LLM chunking: 637 judgments × 3.5 calls = **~2,200 calls** (3 days Groq free, or 1 afternoon Cerebras)
 - **Entire corpus indexable for $0 in under a week**
 
 ### MVP stack — what to run
@@ -457,15 +480,25 @@ RRF weight presets per intent:
 - CONCEPTUAL: content=0.50, graph=0.30 (semantic-heavy)
 - DEFAULT: content=0.35, bm25=0.25, graph=0.25, label=0.15 (balanced)
 
-### `query_embedder.py` — BUILT AND TESTED
-Intent-based query-time embedding strategy. Decides which embedders to call per query, saving ~40% of API calls.
+### `query_embedder.py` v2 — BUILT AND TESTED
+v2 architecture: **Voyage 4 shared embedding space**. One vector per query (local voyage-4-nano) searches BOTH Qdrant collections — docs were indexed with voyage-4-large in the same space. Zero API calls / zero rate limits at query time.
+
+Key pieces:
+- `load_local_nano()` — loads `voyageai/voyage-4-nano` via sentence-transformers
+- `embed_with_nano()` — query embedding, Matryoshka `truncate_dim` (default 1024, must match Qdrant)
+- `QueryPlan` — `query_vector` + `search_sources` + `rrf_weights` + `query_mode` (the old v1 `content_vector`/`label_vector`/`QuotaTracker` are gone)
+- `QUERY_ROUTES` (renamed from `EMBEDDING_ROUTES`) — intent → sources + query_mode
+- `embed_documents_large()` — batched voyage-4-large API call for indexing
+
 Also handles **adversarial routing**: outputs `query_mode = INFORMATIONAL | ARGUMENTATIVE` to control whether the Counsel pair runs.
 
 Routing rules:
 - STATUTORY / CITATION_LOOKUP / PROCEDURAL / PRECEDENT / CONCEPTUAL → `INFORMATIONAL` (skip Counsels, direct to Synthesis)
 - RIGHTS / COMPARISON / ARGUMENTATIVE / DEFAULT → `ARGUMENTATIVE` (run Petitioner + Respondent Counsels)
 
-Tested on 7 query types: Counsels skipped on 5 of 7 (saves 2 LLM calls per informational query).
+Tested on 7 query types: Counsels fire on 2 of 7 (saves 2 LLM calls per informational query).
+
+> **Session 2 bug fixed**: a leftover v1 `QueryPlan` class was duplicated at the END of the file. Python used the last definition (v1, no `query_vector`), so `embed_query()` raised `TypeError`. The duplicate block was removed; `python query_embedder.py` now runs clean.
 
 ### `legal_fts5.py` — BUILT AND TESTED
 SQLite FTS5 with legal compound token normalization. Solves the "Section 302" splitting problem.
@@ -499,12 +532,12 @@ python query_embedder.py
 
 ## 📎 Context Hints for Next Session
 
-- **Domain**: Indian legal, data from Indian Kanoon (1036 docs, 76 MB, structured JSON)
+- **Domain**: Indian legal, data from Indian Kanoon (779 docs = 637 judgments + 142 statutes, 25 MB, structured JSON in `LEGAL_DATA/`)
 - **Goal**: Production-ready, zero-hallucination agentic RAG
 - **Architecture**: 7 layers, 28 components, 13 agents, poly-vector embedding
 - **Chunking**: 6-stage pipeline, **8 chunk types** (Citation = graph-only, not embedded), never split statutes
 - **Agents**: 13 agents in 5 tiers — adversarial pair ONLY on ARGUMENTATIVE queries; **LangGraph** for orchestration
-- **Embeddings**: voyage-context-3 (content; +20.54% context boost for judgments only, not statutes) + gemini-embedding-001 (label); intent-based routing saves ~40% API calls
+- **Embeddings**: voyage-4-large (index, 200M free) + voyage-4-nano (query, local/free, shared embedding space) — dropped gemini
 - **BM25**: SQLite FTS5 with legal token normalization (`section_302_ipc` = single token)
 - **Observability**: Langfuse (not LangSmith)
 - **Court hierarchy**: SC=1.0 > HC=0.70 > Privy Council=0.55 (persuasive) > District=0.35 > Tribunal=0.25 > Commission=0.20

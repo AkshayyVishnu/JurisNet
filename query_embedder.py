@@ -1,166 +1,171 @@
 """
-query_embedder.py
-─────────────────
+query_embedder.py  v2
+─────────────────────
 Query-time embedding strategy for the poly-vector retrieval system.
 
-The problem: We have TWO Qdrant collections (content + label), each using
-a different embedder. Naively embedding every query with BOTH embedders
-wastes API calls and burns free-tier quota. Instead, we use the query
-intent (from the Query Understanding Agent) to decide which embedders
-to call.
+v2 architecture: Voyage 4 shared embedding space.
 
-Three modes:
-    STATUTORY / CITATION_LOOKUP  → label vector + BM25 only  (skip voyage — save quota)
-    PRECEDENT / CONCEPTUAL       → content vector + graph     (skip gemini — not useful)
-    MIXED / DEFAULT              → both vectors + BM25 + graph
+INDEXING (one-time, offline):
+  - voyage-4-large for ALL document embedding (content + label collections)
+  - Both collections use the same Voyage 4 shared space
 
-This saves an API call on ~40% of queries, which matters at Voyage's
-3 RPM free-tier limit (effectively 1.5 queries/minute if calling both).
+QUERYING (every user request):
+  - voyage-4-nano running LOCALLY (Apache 2.0, self-hosted)
+  - Shared embedding space means nano queries work against large-indexed docs
+  - ZERO API calls at query time → ZERO rate limits
+
+Why this beats the previous voyage+gemini split:
+  - No gemini dependency
+  - No 1000 RPD limit from gemini
+  - No different dimensional spaces to manage
+  - voyage-4-nano (local) is faster than any API call
+  - One provider, one SDK, one set of dimensions
+
+Rate limit notes:
+  1. Add a payment method to Voyage — free 200M tokens STILL APPLY,
+     but rate limits jump from 3 RPM → 2000 RPM for batch indexing.
+  2. voyage-4-nano runs locally — infinite throughput at query time.
+  3. voyage-4-large batch token limit: 120K tokens per request.
+     Batch chunks in groups of ~100 (1000 tokens avg) per API call.
 
 Usage:
-    from query_embedder import embed_query, QueryPlan
+    from query_embedder import embed_query, QueryPlan, load_local_nano
 
+    # Load once at startup
+    nano_model = load_local_nano()
+
+    # Per query
     plan = embed_query(
         query="What does Section 302 IPC say about murder?",
         intent="STATUTORY",
-        voyage_client=voyage_client,
-        gemini_client=gemini_client,
+        nano_model=nano_model,
     )
-    # plan.content_vector → None (skipped)
-    # plan.label_vector   → [0.12, -0.34, ...] (768 dims)
-    # plan.search_collections → ["label", "bm25"]
-    # plan.rrf_weights → {"label_vector": 0.30, "bm25": 0.40, ...}
+    # plan.query_vector → [0.12, ...] (1024 dims, same space as voyage-4-large docs)
+    # plan.search_sources → ["label_vector", "bm25"]
+    # plan.query_mode → "INFORMATIONAL" (skip Counsel pair)
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Protocol
+from typing import List, Optional, Any
 from graph_ranker import get_rrf_weights
 
 
-# ─────────────────────────────────────────────
-# Embedding client protocols (duck-typed)
-# ─────────────────────────────────────────────
-# These match the interface of both voyage and gemini clients.
-# LiteLLM or raw API calls both work.
+def load_local_nano(device: str = "cpu"):
+    """
+    Load voyage-4-nano locally.
+    Apache 2.0 license — free to run anywhere.
+    Uses sentence-transformers library.
 
-class EmbeddingClient(Protocol):
-    def embed(self, text: str) -> List[float]:
-        """Embed a single text string, return a vector."""
-        ...
+    Install: pip install sentence-transformers
+
+    For better performance on M1/M2 Mac: device="mps"
+    For GPU: device="cuda"
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer("voyageai/voyage-4-nano", device=device)
+        print(f"voyage-4-nano loaded on {device}")
+        return model
+    except ImportError:
+        raise ImportError(
+            "Install sentence-transformers: pip install sentence-transformers"
+        )
+
+
+def embed_with_nano(text: str, model: Any, truncate_dim: int = 1024) -> List[float]:
+    """
+    Embed a query using local voyage-4-nano.
+    truncate_dim: 2048 / 1024 / 512 / 256 via Matryoshka.
+    Use the same dim as your Qdrant collections (1024 default).
+    """
+    # voyage-4-nano uses encode_query for queries, encode_document for docs
+    # sentence-transformers wraps both via .encode() with prompt_name parameter
+    vector = model.encode(text, prompt_name="query", normalize_embeddings=True)
+    # Truncate if needed via Matryoshka
+    if truncate_dim and truncate_dim < len(vector):
+        vector = vector[:truncate_dim]
+    return vector.tolist()
 
 
 # ─────────────────────────────────────────────
-# Query plan — what the retriever receives
+# Query plan
 # ─────────────────────────────────────────────
 
 @dataclass
 class QueryPlan:
     """
-    Complete query execution plan including vectors, collections to
-    search, RRF weights, and agent routing. Passed to the retrieval engine.
+    Complete query execution plan. Passed to the retrieval engine.
     """
     query_text: str
     intent: str
 
-    # Vectors — None means "skip this collection"
-    content_vector: Optional[List[float]] = None
-    label_vector: Optional[List[float]] = None
+    # Single query vector (voyage-4-nano, shared space with voyage-4-large docs)
+    # Same vector used to search BOTH Qdrant collections
+    query_vector: Optional[List[float]] = None
 
-    # Which retrieval sources to actually run
+    # Which retrieval sources to run
     search_sources: List[str] = field(default_factory=list)
     # → subset of: ["content_vector", "label_vector", "bm25", "citation_graph"]
+    # Note: content_vector and label_vector use the SAME query_vector
+    # (both collections were indexed with voyage-4-large, queried with voyage-4-nano)
 
-    # RRF weights — only for the sources we're actually searching
+    # RRF weights for the sources we're searching
     rrf_weights: dict = field(default_factory=dict)
 
-    # Agent routing — should the adversarial Counsel pair run?
-    # INFORMATIONAL: "What does Section 302 say?" → skip Counsels, direct to Synthesis
-    # ARGUMENTATIVE: "Can a tenant be evicted without notice?" → run both Counsels
+    # Agent routing
+    # INFORMATIONAL → skip Counsel pair, go direct to Synthesis
+    # ARGUMENTATIVE → run Petitioner + Respondent Counsels
     query_mode: str = "INFORMATIONAL"
-    # → "INFORMATIONAL" or "ARGUMENTATIVE"
-
-    # API calls used (for quota tracking)
-    api_calls_made: dict = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────
-# Intent → embedding routing
+# Intent → source routing
 # ─────────────────────────────────────────────
 
-# Which embedders to call per intent type.
-# True = call this embedder. False = skip.
-
-EMBEDDING_ROUTES: dict[str, dict] = {
-    # "Section 302 IPC", "Article 21" — label match is the primary signal
+QUERY_ROUTES: dict[str, dict] = {
     "STATUTORY": {
-        "content": False,
-        "label":   True,
-        "sources": ["label_vector", "bm25"],
-        "query_mode": "INFORMATIONAL",    # "what does the law say" — no adversarial pair
+        "sources":     ["label_vector", "bm25"],
+        "query_mode":  "INFORMATIONAL",
+        # Label-heavy: "Section 302 IPC" → exact identifier match
     },
-
-    # "Look up AIR 1997 SC 3011" — exact citation lookup
     "CITATION_LOOKUP": {
-        "content": False,
-        "label":   True,
-        "sources": ["label_vector", "bm25"],
-        "query_mode": "INFORMATIONAL",
+        "sources":     ["label_vector", "bm25"],
+        "query_mode":  "INFORMATIONAL",
+        # "AIR 1997 SC 3011" → exact citation string
     },
-
-    # "Cases that followed Vishaka on workplace harassment"
     "PRECEDENT": {
-        "content": True,
-        "label":   False,
-        "sources": ["content_vector", "bm25", "citation_graph"],
-        "query_mode": "INFORMATIONAL",    # looking up precedent, not arguing
+        "sources":     ["content_vector", "bm25", "citation_graph"],
+        "query_mode":  "INFORMATIONAL",
+        # "cases that followed Vishaka" → semantic + graph traversal
     },
-
-    # "Right to privacy evolution", "What is mens rea?"
     "CONCEPTUAL": {
-        "content": True,
-        "label":   False,
-        "sources": ["content_vector", "bm25", "citation_graph"],
-        "query_mode": "INFORMATIONAL",
+        "sources":     ["content_vector", "bm25", "citation_graph"],
+        "query_mode":  "INFORMATIONAL",
+        # "what is mens rea" → pure semantic retrieval
     },
-
-    # "Right to life under Article 21" — needs both concept + identifier
     "RIGHTS": {
-        "content": True,
-        "label":   True,
-        "sources": ["content_vector", "label_vector", "bm25", "citation_graph"],
-        "query_mode": "ARGUMENTATIVE",    # rights questions often have competing interests
+        "sources":     ["content_vector", "label_vector", "bm25", "citation_graph"],
+        "query_mode":  "ARGUMENTATIVE",
+        # "right to privacy under Article 21" → both identifier + concept + competing rights
     },
-
-    # "Compare Vishaka guidelines with POSH Act 2013"
     "COMPARISON": {
-        "content": True,
-        "label":   True,
-        "sources": ["content_vector", "label_vector", "bm25", "citation_graph"],
-        "query_mode": "ARGUMENTATIVE",    # comparisons benefit from both sides
+        "sources":     ["content_vector", "label_vector", "bm25", "citation_graph"],
+        "query_mode":  "ARGUMENTATIVE",
+        # "compare Vishaka with POSH Act" → adversarial perspectives add value
     },
-
-    # "How to file an appeal under Section 96 CPC?"
     "PROCEDURAL": {
-        "content": True,
-        "label":   True,
-        "sources": ["content_vector", "label_vector", "bm25"],
-        "query_mode": "INFORMATIONAL",    # procedure is factual, not argumentative
+        "sources":     ["content_vector", "label_vector", "bm25"],
+        "query_mode":  "INFORMATIONAL",
+        # "how to file Section 96 CPC appeal" → factual, no adversarial needed
     },
-
-    # "Can a tenant be evicted without notice in Delhi?"
     "ARGUMENTATIVE": {
-        "content": True,
-        "label":   True,
-        "sources": ["content_vector", "label_vector", "bm25", "citation_graph"],
-        "query_mode": "ARGUMENTATIVE",    # explicit argumentative query
+        "sources":     ["content_vector", "label_vector", "bm25", "citation_graph"],
+        "query_mode":  "ARGUMENTATIVE",
+        # "can a tenant be evicted without notice" → explicitly wants both sides
     },
-
-    # Fallback — search everything, assume argumentative to be safe
     "DEFAULT": {
-        "content": True,
-        "label":   True,
-        "sources": ["content_vector", "label_vector", "bm25", "citation_graph"],
-        "query_mode": "ARGUMENTATIVE",
+        "sources":     ["content_vector", "label_vector", "bm25", "citation_graph"],
+        "query_mode":  "ARGUMENTATIVE",
     },
 }
 
@@ -168,137 +173,112 @@ EMBEDDING_ROUTES: dict[str, dict] = {
 def embed_query(
     query: str,
     intent: str,
-    voyage_client: Optional[EmbeddingClient] = None,
-    gemini_client: Optional[EmbeddingClient] = None,
+    nano_model: Any,
+    truncate_dim: int = 1024,
 ) -> QueryPlan:
     """
-    Embed the query with the appropriate embedder(s) based on intent.
+    Embed query with local voyage-4-nano and build the query plan.
 
     Args:
-        query:          The user's legal query text
-        intent:         Intent from Query Understanding Agent
-                        (STATUTORY / PRECEDENT / CONCEPTUAL / RIGHTS /
-                         COMPARISON / PROCEDURAL / CITATION_LOOKUP / DEFAULT)
-        voyage_client:  Content embedder (voyage-context-3)
-        gemini_client:  Label embedder (gemini-embedding-001)
-
-    Returns:
-        QueryPlan with vectors, search sources, and RRF weights
+        query:        User's legal query text
+        intent:       Intent from Query Understanding Agent
+        nano_model:   Loaded SentenceTransformer model (call load_local_nano() once at startup)
+        truncate_dim: Must match dimension of your Qdrant collections (default 1024)
     """
-    route = EMBEDDING_ROUTES.get(intent.upper(), EMBEDDING_ROUTES["DEFAULT"])
+    route = QUERY_ROUTES.get(intent.upper(), QUERY_ROUTES["DEFAULT"])
+
+    # Embed once — same vector searches both content + label collections
+    # (because both were indexed with voyage-4-large in the shared embedding space)
+    query_vector = embed_with_nano(query, nano_model, truncate_dim)
 
     plan = QueryPlan(
         query_text     = query,
         intent         = intent.upper(),
+        query_vector   = query_vector,
         search_sources = route["sources"],
-        query_mode     = route.get("query_mode", "ARGUMENTATIVE"),
+        query_mode     = route["query_mode"],
     )
 
-    # Embed with content embedder (voyage-context-3) if needed
-    if route["content"] and voyage_client is not None:
-        plan.content_vector = voyage_client.embed(query)
-        plan.api_calls_made["voyage"] = 1
-
-    # Embed with label embedder (gemini-embedding-001) if needed
-    if route["label"] and gemini_client is not None:
-        plan.label_vector = gemini_client.embed(query)
-        plan.api_calls_made["gemini"] = 1
-
-    # Get RRF weights for the intent — only for sources we're searching
+    # RRF weights — normalized to the sources we're actually searching
     full_weights = get_rrf_weights(intent)
-    plan.rrf_weights = {
-        source: full_weights.get(source, 0.0)
-        for source in plan.search_sources
-    }
-
-    # Re-normalize weights to sum to 1.0 (since we may have dropped sources)
-    total = sum(plan.rrf_weights.values())
-    if total > 0:
-        plan.rrf_weights = {k: v / total for k, v in plan.rrf_weights.items()}
+    raw = {s: full_weights.get(s, 0.0) for s in route["sources"]}
+    total = sum(raw.values())
+    plan.rrf_weights = {k: round(v / total, 4) for k, v in raw.items()} if total > 0 else raw
 
     return plan
 
 
 # ─────────────────────────────────────────────
-# Quota tracking — helps plan free-tier usage
+# Indexing helper — voyage-4-large batched
 # ─────────────────────────────────────────────
 
-@dataclass
-class QuotaTracker:
+def embed_documents_large(
+    texts: List[str],
+    voyage_api_key: str,
+    batch_size: int = 100,
+    truncate_dim: int = 1024,
+) -> List[List[float]]:
     """
-    Tracks API calls per provider across a session.
-    Helps stay within free-tier limits.
+    Embed documents using voyage-4-large via API.
+    Call this ONCE during indexing (not at query time).
+
+    batch_size: voyage-4-large batch limit ~120K tokens = ~100 chunks at 1000 tokens avg.
+    Add a payment method to get 2000 RPM (free tokens still apply).
+
+    Returns list of vectors in the same order as input texts.
     """
-    voyage_calls: int = 0
-    gemini_calls: int = 0
+    import voyageai
+    client = voyageai.Client(api_key=voyage_api_key)
 
-    # Free-tier limits (verify before implementation — these change)
-    VOYAGE_RPM_FREE: int = 3         # 3 RPM without payment method
-    GEMINI_RPD_FREE: int = 1000      # 1000 requests per day
+    all_vectors = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        result = client.embed(
+            batch,
+            model="voyage-4-large",
+            input_type="document",
+            output_dimension=truncate_dim,
+        )
+        all_vectors.extend(result.embeddings)
 
-    def record(self, plan: QueryPlan):
-        self.voyage_calls += plan.api_calls_made.get("voyage", 0)
-        self.gemini_calls += plan.api_calls_made.get("gemini", 0)
-
-    @property
-    def voyage_remaining_today(self) -> str:
-        """Rough estimate — actual limit is RPM-based, not daily."""
-        return f"~{self.VOYAGE_RPM_FREE * 60 * 8 - self.voyage_calls} calls remaining (8hr day)"
-
-    @property
-    def gemini_remaining_today(self) -> int:
-        return self.GEMINI_RPD_FREE - self.gemini_calls
+    return all_vectors
 
 
 # ─────────────────────────────────────────────
-# Example usage
+# Example / test
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Simulated — no real API calls
-    class MockEmbedder:
-        def embed(self, text: str) -> List[float]:
-            return [0.0] * 10  # placeholder
+    # Mock nano model for testing without downloading
+    class MockNano:
+        def encode(self, text, prompt_name=None, normalize_embeddings=True):
+            import numpy as np
+            return np.zeros(1024)
 
-    voyage = MockEmbedder()
-    gemini = MockEmbedder()
-    tracker = QuotaTracker()
+    nano = MockNano()
 
     test_queries = [
-        ("What does Section 302 IPC say?",                     "STATUTORY"),
-        ("Cases that followed Vishaka on workplace harassment", "PRECEDENT"),
-        ("Right to privacy under Article 21",                  "RIGHTS"),
-        ("Look up AIR 1997 SC 3011",                           "CITATION_LOOKUP"),
-        ("What is mens rea in Indian criminal law?",           "CONCEPTUAL"),
-        ("Can a tenant be evicted without notice in Delhi?",   "ARGUMENTATIVE"),
-        ("How to file an appeal under Section 96 CPC?",        "PROCEDURAL"),
+        ("What does Section 302 IPC say about murder?",           "STATUTORY"),
+        ("Cases that followed Vishaka on workplace harassment",    "PRECEDENT"),
+        ("Right to privacy under Article 21",                     "RIGHTS"),
+        ("AIR 1997 SC 3011",                                      "CITATION_LOOKUP"),
+        ("What is mens rea in Indian criminal law?",              "CONCEPTUAL"),
+        ("Can a tenant be evicted without notice in Delhi?",      "ARGUMENTATIVE"),
+        ("How to file appeal under Section 96 CPC?",             "PROCEDURAL"),
     ]
 
-    print("=== Query-time embedding + agent routing decisions ===\n")
+    print("=== Query routing (v2 — single vector, local nano) ===\n")
+    argumentative_count = 0
     for query, intent in test_queries:
-        plan = embed_query(query, intent, voyage, gemini)
-        tracker.record(plan)
-
-        calls = []
-        if plan.content_vector is not None:
-            calls.append("voyage ✓")
-        else:
-            calls.append("voyage ✗")
-        if plan.label_vector is not None:
-            calls.append("gemini ✓")
-        else:
-            calls.append("gemini ✗")
-
-        counsel = "→ Petitioner + Respondent Counsels" if plan.query_mode == "ARGUMENTATIVE" else "→ Direct to Synthesis (skip Counsels)"
-
-        print(f"  Query:   {query}")
-        print(f"  Intent:  {intent}  |  Mode: {plan.query_mode}")
-        print(f"  Calls:   {', '.join(calls)}")
-        print(f"  Sources: {plan.search_sources}")
-        print(f"  Agent:   {counsel}")
+        plan = embed_query(query, intent, nano)
+        counsel = "→ Counsel pair" if plan.query_mode == "ARGUMENTATIVE" else "→ Direct to Synthesis"
+        if plan.query_mode == "ARGUMENTATIVE":
+            argumentative_count += 1
+        print(f"  [{intent:16s}]  {query[:52]}")
+        print(f"    Sources: {plan.search_sources}")
+        print(f"    Weights: { {k: v for k, v in plan.rrf_weights.items()} }")
+        print(f"    Agents:  {counsel}")
         print()
 
-    n = len(test_queries)
-    print(f"Total API calls: voyage={tracker.voyage_calls}, gemini={tracker.gemini_calls}")
-    print(f"Saved {n - tracker.voyage_calls} voyage + {n - tracker.gemini_calls} gemini calls out of {n} queries")
-    print(f"Adversarial pair skipped on {sum(1 for q, i in test_queries if EMBEDDING_ROUTES.get(i.upper(), EMBEDDING_ROUTES['DEFAULT'])['query_mode'] == 'INFORMATIONAL')} of {n} queries")
+    print(f"API calls at query time: 0 (all queries use local nano)")
+    print(f"Counsel pair fired: {argumentative_count}/{len(test_queries)} queries")
