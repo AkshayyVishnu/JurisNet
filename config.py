@@ -41,7 +41,12 @@ PROVISIONS_DIR = CORPUS_DIR / "provisions"
 CHUNKS_DIR = ROOT / "chunks"
 CHUNKS_JUDGMENTS_DIR = CHUNKS_DIR / "judgments"
 CHUNKS_PROVISIONS_DIR = CHUNKS_DIR / "provisions"
+CHUNKS_RULES_DIR = CHUNKS_DIR / "rules"          # Stage C: CPC Orders & Rules
 CITATION_EDGES_FILE = CHUNKS_DIR / "_citation_edges.json"
+RULE_EDGES_FILE = CHUNKS_DIR / "_rule_edges.json"  # judgment -> rule edges (from cited_by)
+
+# Raw Orders & Rules source (Stage C), pulled from origin/main.
+ORDERS_RULES_DIR = ROOT / "Orders_Rules"
 
 # Persistent SQLite FTS5 database (legal_fts5 uses :memory: by default).
 FTS5_DB_PATH = ROOT / "legal_fts5.db"
@@ -86,6 +91,24 @@ NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "password").strip()
 # ─────────────────────────────────────────────
 GROQ_MODEL = "llama-3.1-8b-instant"        # Query Understanding + Citation Verifier
 GEMINI_MODEL = "gemini-2.5-flash"          # Synthesis
+
+# Stage B enrichment: Groq 70B is primary (high daily quota); Gemini is the
+# fallback for docs whose prompt exceeds Groq's per-minute token cap. Gemini's
+# free tier is only ~20 req/day PER MODEL, so we rotate across several models.
+# Called through LiteLLM (provider/model). Groq primary; Gemini for long docs.
+# flash-lite listed first — it tends to retain daily quota after flash is spent.
+STAGE_B_CEREBRAS_MODEL = "cerebras/gpt-oss-120b"  # primary when keys present (fast, fresh quota)
+STAGE_B_GROQ_MODEL = "groq/llama-3.3-70b-versatile"
+STAGE_B_GEMINI_MODELS = [
+    "gemini/gemini-2.5-flash-lite",
+    "gemini/gemini-2.0-flash-lite",
+    "gemini/gemini-2.0-flash",
+    "gemini/gemini-2.5-flash",
+]
+# Groq 70B is 100K tokens/min + 128K context, so it handles essentially every doc
+# (max body ~381K chars ~= 95K tokens). Only genuinely enormous prompts fall back
+# to Gemini. Keep concurrency modest so keys don't saturate the per-minute budget.
+GROQ_MAX_PROMPT_CHARS = 480000
 
 # Cooldown (seconds) a key sits out after a 429 before the rotator reuses it.
 KEY_COOLDOWN_SECONDS = 60.0

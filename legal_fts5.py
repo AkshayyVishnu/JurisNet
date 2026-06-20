@@ -220,6 +220,19 @@ class LegalFTS5:
         """
         normalized_query = normalize_legal_text(query)
 
+        # Sanitize into a safe FTS5 MATCH expression: raw NL queries contain
+        # punctuation/operators ("?", "-", etc.) that FTS5 parses as syntax and
+        # rejects. Keep word/underscore tokens (incl. legal compounds like
+        # section_302_ipc), drop stopwords, OR them for BM25 recall.
+        _STOP = {"the", "a", "an", "is", "are", "was", "were", "of", "for", "to",
+                 "in", "on", "and", "or", "what", "under", "how", "does", "do",
+                 "can", "with", "by", "be", "this", "that", "it", "as", "at"}
+        tokens = [t for t in re.findall(r"[a-z0-9_]+", normalized_query.lower())
+                  if len(t) > 1 and t not in _STOP]
+        if not tokens:
+            return []
+        match_expr = " OR ".join(tokens)
+
         # FTS5 match query — use quotes for phrase matching on compound tokens
         rows = self.conn.execute(
             """
@@ -230,7 +243,7 @@ class LegalFTS5:
             ORDER BY rank
             LIMIT ?
             """,
-            (normalized_query, top_k),
+            (match_expr, top_k),
         ).fetchall()
 
         results = []

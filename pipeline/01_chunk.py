@@ -215,18 +215,20 @@ def chunk_judgment(data: dict, prov_map: dict[int, str]) -> tuple[dict, list[dic
 
     # ── L2 paragraph chunks (with bounded sliding overlap) ──
     paras = enforce_max(segment_paragraphs(body) or window_chunks(body))
-    l2_chunks: list[L2ParaChunk] = []
+    l2_dicts: list[dict] = []
     for i, (pid, ptext) in enumerate(paras):
         prev = paras[i - 1][1] if i > 0 else ""
         overlap = (prev[-OVERLAP_CHARS:].strip() + "\n\n") if prev else ""
         breadcrumb = _breadcrumb(title, court, "unclassified", pid)
-        l2_chunks.append(L2ParaChunk(
+        c = asdict(L2ParaChunk(
             tid=tid,
             title=title,
             para_id=pid,
             section_type="unclassified",  # Stage B assigns real section types
             text=f"{breadcrumb}\n\n{overlap}{ptext}",
         ))
+        c["raw"] = ptext  # clean paragraph text (no breadcrumb/overlap) for Stage B
+        l2_dicts.append(c)
 
     # ── Citation edges (from pre-resolved ID lists) ──
     edges: list[dict] = []
@@ -255,12 +257,13 @@ def chunk_judgment(data: dict, prov_map: dict[int, str]) -> tuple[dict, list[dic
     chunk = {
         "doc_type": "judgment",
         "l0": asdict(l0),
-        "l2_paragraphs": [asdict(c) for c in l2_chunks],
+        "l2_paragraphs": l2_dicts,
         # Stage B fills these:
         "l1_sections": [],
         "l3_atomic": [],
         "ratio_chunks": [],
         "issue_held": [],
+        "stage_b_done": False,
     }
     return chunk, edges
 
@@ -331,18 +334,20 @@ def run() -> None:
     ppaths = sorted(pdir.glob("*.json"))
     print(f"Found {len(jpaths)} judgments, {len(ppaths)} provisions")
 
-    # ── Provisions first (build id->title map for richer judgment L0 summaries) ──
+    # ── Provisions first: chunk them AND build a rich id->"<section_ref> <act>"
+    #    map so judgment L0 summaries name cited statutes (e.g. "Section 75 The
+    #    Code of Civil Procedure") instead of bare "Section 75". ──
     prov_map: dict[int, str] = {}
     all_edges: list[dict] = []
-    for p in ppaths:
-        d = _load(p)
-        prov_map[int(d["doc_id"])] = d.get("title", "")
-    judg_ids = {int(_load(p)["doc_id"]) for p in jpaths}
-
     for p in ppaths:
         chunk, edges = chunk_statute(_load(p))
         _write(out_p / p.name, chunk)
         all_edges.extend(edges)
+        pv = chunk["provision"]
+        label = f"{pv['section_ref']} {pv['act_name']}".strip() if pv["act_name"] else pv["section_ref"]
+        prov_map[pv["tid"]] = label
+
+    judg_ids = {int(_load(p)["doc_id"]) for p in jpaths}
 
     # ── Judgments ──
     stats = Counter()
@@ -376,7 +381,13 @@ def run() -> None:
             e["in_corpus"] = e["to_tid"] in judg_ids
             if e["in_corpus"]:
                 e["to_title"] = judg_titles.get(e["to_tid"], "")
-        key = (e["from_tid"], e["to_tid"], e["to_title"], e["rel_type"])
+        elif e["rel_type"] == "CITES_STATUTE":
+            # Normalize to the rich provision label so judgment-side and
+            # provision-side reverse edges dedup to one entry.
+            e["to_title"] = prov_map.get(e["to_tid"], e["to_title"])
+        # Dedup on the target id (title-independent); rule edges have no id.
+        key = ((e["from_tid"], e["to_tid"], e["rel_type"]) if e["to_tid"] is not None
+               else (e["from_tid"], e["to_title"], e["rel_type"]))
         if key in seen:
             continue
         seen.add(key)

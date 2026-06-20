@@ -116,6 +116,8 @@ class KeyPool:
 # Module-level singletons — import these.
 GROQ_POOL = KeyPool("groq", _load_keys("GROQ_API_KEY"))
 GEMINI_POOL = KeyPool("gemini", _load_keys("GOOGLE_API_KEY"))
+VOYAGE_POOL = KeyPool("voyage", _load_keys("VOYAGE_API_KEY"))
+CEREBRAS_POOL = KeyPool("cerebras", _load_keys("CEREBRAS_API_KEY"))
 
 
 T = TypeVar("T")
