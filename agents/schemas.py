@@ -41,6 +41,23 @@ class Complexity(str, Enum):
     COMPLEX = "complex"
 
 
+class QueryType(str, Enum):
+    """
+    Per-sub-question type classification. Drives downstream pipeline routing:
+      • test_application — the sub-question asks whether a fact pattern satisfies
+        a legal test/standard. Full pipeline: Researcher → Checklist Resolver →
+        Auditor → Adjudicator.
+      • informational — the sub-question is explanatory, definitional, or
+        procedural. Short pipeline: Researcher → Adjudicator directly, skipping
+        Checklist Resolver and Auditor entirely.
+    The distinction matters because informational queries have no checklist to
+    resolve and no facts to audit — forcing them through those stages wastes
+    tokens and risks hallucinated checklists on definitional content.
+    """
+    TEST_APPLICATION = "test_application"
+    INFORMATIONAL = "informational"
+
+
 class RelationshipType(str, Enum):
     """
     How a sub-question relates to its siblings. Drives the Adjudicator (CLAUDE.md §2b):
@@ -73,6 +90,32 @@ class SubQuestionDraft(BaseModel):
             "bake that link INTO this text so it reads completely on its own — do not "
             "rely on the other sub-questions for meaning."
         )
+    )
+    query_type: QueryType = Field(
+        description=(
+            "Classify this sub-question's type for downstream pipeline routing:\n"
+            "  • test_application — the question asks whether a specific fact pattern "
+            "satisfies a legal test, standard, or set of statutory conditions. "
+            "Examples: 'Can my landlord evict me for non-payment?', 'Does this "
+            "contract clause violate Section 23 of the Indian Contract Act?'\n"
+            "  • informational — the question is explanatory, definitional, or "
+            "procedural. It asks WHAT something is, HOW a process works, or WHAT a "
+            "provision says — without applying it to a fact pattern. "
+            "Examples: 'What does Order 1 Rule 10 CPC allow?', 'What is the "
+            "procedure for filing a civil suit?', 'What is res judicata?'"
+        )
+    )
+    provision_key: Optional[str] = Field(
+        default=None,
+        description=(
+            "The identified legal provision this sub-question targets, if one is "
+            "identifiable. Use the most specific provision reference available — "
+            "this can be a statute section (e.g. 'Order 1 Rule 10 CPC', 'Section 23 "
+            "Indian Contract Act'), a case-law doctrine (e.g. 'res judicata', "
+            "'doctrine of frustration'), or a procedural rule. This is NOT limited "
+            "to statutes — case-law-only doctrines are valid provision keys. "
+            "Null if the sub-question is too general to tie to a specific provision."
+        ),
     )
     complexity: Complexity = Field(
         description=(
@@ -199,11 +242,22 @@ class SubQuestion(BaseModel):
     """A finished sub-question handed to the Researcher."""
     id: int
     text: str
+    query_type: QueryType
+    provision_key: Optional[str] = None
     complexity: Complexity
     relationship_type: RelationshipType
     depends_on: List[int] = Field(default_factory=list)
     known_facts: List[str] = Field(default_factory=list)
     shared_context: SharedContext
+
+    @property
+    def recommended_pipeline(self) -> str:
+        """
+        The downstream pipeline this sub-question should follow:
+          • 'full'  (test_application) → Researcher → Checklist Resolver → Auditor → Adjudicator
+          • 'short' (informational)    → Researcher → Adjudicator (skip Checklist Resolver + Auditor)
+        """
+        return "full" if self.query_type == QueryType.TEST_APPLICATION else "short"
 
 
 class QueryAgentResult(BaseModel):

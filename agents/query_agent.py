@@ -33,6 +33,7 @@ from .schemas import (
     Complexity,
     QueryAnalysis,
     QueryAgentResult,
+    QueryType,
     RelationshipType,
     SharedContext,
     SubQuestion,
@@ -143,21 +144,38 @@ Do your job in this order:
      user is asking about both.
 
    For each sub-question you DO emit:
-   - It MUST read completely on its own. When the original query links issues
-     causally, BAKE that link into the sub-question text — do not drop it and do not
-     leave it for a later stage to reconstruct.
-   - Set relationship_type for each sub-question:
-       * independent — stands alone, unrelated to the other sub-questions.
-       * causal — the original query ties this issue to another by cause/effect.
-         Example: "my landlord raised my rent BECAUSE I refused to vacate" -> the
-         rent-increase sub-question is 'causal' and its depends_on lists the
-         sub-question it hinges on (the vacate-request one).
-       * dependent — answering this needs another sub-question's answer first.
-     When the original query uses a linking word (because, after, since, so, as a
-     result, in response to, when I) prefer causal/dependent and set depends_on to the
-     id(s) it links to. Use independent ONLY when the issues are genuinely unrelated.
-   - Rate complexity: simple = one provision/fact lookup; moderate = a few sources
-     combined; complex = multi-issue or needs broad context.
+    - It MUST read completely on its own. When the original query links issues
+      causally, BAKE that link into the sub-question text — do not drop it and do not
+      leave it for a later stage to reconstruct.
+    - Set query_type for each sub-question (REQUIRED — this drives pipeline routing):
+        * test_application — the sub-question asks whether a specific fact pattern
+          satisfies a legal test, standard, or set of statutory/case-law conditions.
+          These need the full verification pipeline (Researcher → Checklist Resolver →
+          Auditor → Adjudicator). Examples: "Can my landlord evict me for non-payment?",
+          "Does this contract clause violate Section 23?"
+        * informational — the sub-question is explanatory, definitional, or procedural.
+          It asks WHAT something is, HOW a process works, or WHAT a provision says —
+          without applying it to a specific fact pattern. These skip straight from
+          Researcher to Adjudicator (no checklist, no audit). Examples: "What does Order
+          1 Rule 10 CPC allow?", "What is the procedure for filing a suit?", "What is
+          res judicata?"
+    - Set provision_key if a specific legal provision or doctrine is identifiable. This
+      is the lookup key for the Checklist Resolver downstream, so be precise. It is NOT
+      limited to statute sections — case-law-only doctrines (e.g. "res judicata",
+      "doctrine of frustration") are valid provision keys. Null only if the sub-question
+      is too general to tie to any specific provision.
+    - Set relationship_type for each sub-question:
+        * independent — stands alone, unrelated to the other sub-questions.
+        * causal — the original query ties this issue to another by cause/effect.
+          Example: "my landlord raised my rent BECAUSE I refused to vacate" → the
+          rent-increase sub-question is 'causal' and its depends_on lists the
+          sub-question it hinges on (the vacate-request one).
+        * dependent — answering this needs another sub-question's answer first.
+      When the original query uses a linking word (because, after, since, so, as a
+      result, in response to, when I) prefer causal/dependent and set depends_on to the
+      id(s) it links to. Use independent ONLY when the issues are genuinely unrelated.
+    - Rate complexity: simple = one provision/fact lookup; moderate = a few sources
+      combined; complex = multi-issue or needs broad context.
 
 If the conversation already contains the user's answer to a previous clarifying
 question, USE it and continue — do not ask the same thing again.
@@ -322,6 +340,8 @@ def _to_result(
         SubQuestion(
             id=i,
             text=draft.text,
+            query_type=draft.query_type,
+            provision_key=draft.provision_key,
             complexity=draft.complexity,
             relationship_type=draft.relationship_type,
             depends_on=draft.depends_on,

@@ -34,6 +34,7 @@ from agents.schemas import (
     ClarificationKind,
     Complexity,
     QueryAnalysis,
+    QueryType,
     RelationshipType,
     SubQuestionDraft,
 )
@@ -102,6 +103,7 @@ def offline_tests() -> None:
         unknown_fields=["filing court"],
         sub_questions=[SubQuestionDraft(
             text="What is the court fee for a civil suit?",
+            query_type=QueryType.INFORMATIONAL,
             complexity=Complexity.SIMPLE,
             relationship_type=RelationshipType.INDEPENDENT,
         )],
@@ -132,9 +134,11 @@ def offline_tests() -> None:
         extracted_facts=["f"],
         needs_clarification=False,
         sub_questions=[
-            SubQuestionDraft(text="A?", complexity=Complexity.SIMPLE,
+            SubQuestionDraft(text="A?", query_type=QueryType.INFORMATIONAL,
+                             complexity=Complexity.SIMPLE,
                              relationship_type=RelationshipType.INDEPENDENT),
-            SubQuestionDraft(text="B?", complexity=Complexity.SIMPLE,
+            SubQuestionDraft(text="B?", query_type=QueryType.INFORMATIONAL,
+                             complexity=Complexity.SIMPLE,
                              relationship_type=RelationshipType.INDEPENDENT),
         ],
     ))
@@ -142,6 +146,46 @@ def offline_tests() -> None:
     check("assembly: ids 1,2", [s.id for s in r.sub_questions] == [1, 2], r)
     check("assembly: shared context identical",
           r.sub_questions[0].shared_context == r.sub_questions[1].shared_context, r)
+
+    # --- query_type + provision_key plumbing ---
+    typed_fake = FakeLLM(QueryAnalysis(
+        reformulated_query="eviction test",
+        extracted_facts=["tenant", "non-payment"],
+        needs_clarification=False,
+        sub_questions=[
+            SubQuestionDraft(
+                text="Can a landlord evict for non-payment?",
+                query_type=QueryType.TEST_APPLICATION,
+                provision_key="Transfer of Property Act Section 111",
+                complexity=Complexity.MODERATE,
+                relationship_type=RelationshipType.INDEPENDENT,
+            ),
+            SubQuestionDraft(
+                text="What is the procedure for filing an eviction suit?",
+                query_type=QueryType.INFORMATIONAL,
+                provision_key="Order 37 CPC",
+                complexity=Complexity.SIMPLE,
+                relationship_type=RelationshipType.INDEPENDENT,
+            ),
+        ],
+    ))
+    r = run_query_agent("eviction stuff", llm=typed_fake)
+    check("query_type: test_application passes through",
+          r.sub_questions[0].query_type == QueryType.TEST_APPLICATION, r)
+    check("query_type: informational passes through",
+          r.sub_questions[1].query_type == QueryType.INFORMATIONAL, r)
+    check("provision_key: passes through",
+          r.sub_questions[0].provision_key == "Transfer of Property Act Section 111", r)
+    check("recommended_pipeline: test_application -> full",
+          r.sub_questions[0].recommended_pipeline == "full", r)
+    check("recommended_pipeline: informational -> short",
+          r.sub_questions[1].recommended_pipeline == "short", r)
+    check("provision_key: None when not set",
+          SubQuestionDraft(
+              text="x", query_type=QueryType.INFORMATIONAL,
+              complexity=Complexity.SIMPLE,
+              relationship_type=RelationshipType.INDEPENDENT,
+          ).provision_key is None, r)
 
 
 # ─────────────────────────────────────────────
@@ -298,6 +342,64 @@ def live_tests() -> None:
               all(s.shared_context.known_facts == first_facts for s in f.sub_questions), f)
     else:
         check("E1: produced a multi-question split to test", False, f)
+
+    # ---- F. Query type classification ----
+    print("\n-- F1: informational query (definitional) --")
+    res = run_scripted("What does Order 1 Rule 10 of the Code of Civil Procedure allow?", [])
+    f = res[-1]
+    if f.is_ready:
+        check("F1: classified as informational",
+              all(s.query_type == QueryType.INFORMATIONAL for s in f.sub_questions), f,
+              detail=f"got {[s.query_type.value for s in f.sub_questions]}")
+        check("F1: recommended_pipeline == short",
+              all(s.recommended_pipeline == "short" for s in f.sub_questions), f)
+        check("F1: provision_key populated",
+              any(s.provision_key is not None for s in f.sub_questions), f)
+    else:
+        check("F1: expected ready", False, f)
+
+    print("\n-- F2: test_application query (fact pattern vs legal test) --")
+    res = run_scripted(
+        "My landlord is trying to evict me because I have not paid rent for "
+        "the last three months. Can he do that?", [])
+    f = res[-1]
+    if f.is_ready:
+        check("F2: at least one sub-question classified as test_application",
+              any(s.query_type == QueryType.TEST_APPLICATION for s in f.sub_questions), f,
+              detail=f"got {[s.query_type.value for s in f.sub_questions]}")
+        ta_sq = next((s for s in f.sub_questions
+                      if s.query_type == QueryType.TEST_APPLICATION), None)
+        check("F2: test_application recommended_pipeline == full",
+              ta_sq is not None and ta_sq.recommended_pipeline == "full", f)
+    else:
+        check("F2: expected ready", False, f)
+
+    print("\n-- F3: mixed query (compound with both types) --")
+    res = run_scripted(
+        "What is res judicata, and does it apply to my case where the same "
+        "issue was already decided by the District Court?", [])
+    f = res[-1]
+    if f.is_ready and len(f.sub_questions) >= 2:
+        types = {s.query_type for s in f.sub_questions}
+        check("F3: has both informational and test_application sub-questions",
+              QueryType.INFORMATIONAL in types and QueryType.TEST_APPLICATION in types, f,
+              detail=f"got {[s.query_type.value for s in f.sub_questions]}")
+    elif f.is_ready:
+        # Acceptable: model might treat it as a single test_application
+        check("F3: at least classified something",
+              len(f.sub_questions) >= 1, f)
+    else:
+        check("F3: expected ready", False, f)
+
+    print("\n-- F4: provision_key covers case-law doctrines (not just statutes) --")
+    res = run_scripted("What is the doctrine of res judicata?", [])
+    f = res[-1]
+    if f.is_ready:
+        check("F4: provision_key set for case-law doctrine",
+              any(s.provision_key is not None for s in f.sub_questions), f,
+              detail=f"provision_keys: {[s.provision_key for s in f.sub_questions]}")
+    else:
+        check("F4: expected ready", False, f)
 
 
 # ─────────────────────────────────────────────

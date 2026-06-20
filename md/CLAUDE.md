@@ -62,6 +62,16 @@ USER QUERY
 FINAL ANSWER
 ```
 
+**Per-sub-question pipeline routing (Query Agent decides):**
+- `test_application` (fact pattern vs. legal standard) → full pipeline:
+  Researcher → Checklist Resolver → Auditor → Adjudicator
+- `informational` (explanatory/definitional/procedural) → short pipeline:
+  Researcher → Adjudicator directly, skipping Checklist Resolver + Auditor
+
+The Query Agent classifies each sub-question's `query_type` alongside its
+complexity rating. The graph wiring reads `sub_question.recommended_pipeline`
+(`"full"` or `"short"`) to route accordingly.
+
 **Important: do not reduce this architecture for hackathon time pressure.** All 3
 agents + 2 modules, the cache-by-provision-ID mechanism, the regex-only Pull C, and
 the ✅/❌/❓ verification step are implemented as specified — not flattened into a
@@ -205,10 +215,30 @@ default `function_calling` method.
   caller records `kind` on each history turn (`{question, answer, kind}`).
   `extracted_facts` + `unknown_fields` are surfaced on EVERY result (clarify too) for
   visibility.
+- **Per-sub-question type classification (pipeline routing).** Each sub-question
+  gets a `query_type` (`test_application` or `informational`) alongside its
+  complexity rating. `test_application` queries (fact pattern vs. legal standard)
+  need the full pipeline (Researcher → Checklist Resolver → Auditor →
+  Adjudicator); `informational` queries (explanatory/definitional/procedural)
+  skip straight from Researcher to Adjudicator. The `SubQuestion.recommended_pipeline`
+  property returns `"full"` or `"short"` for downstream routing.
+- **Provision key (not just statute).** Each sub-question carries an optional
+  `provision_key` — the identified legal provision or doctrine the question targets.
+  This is the lookup key for the Checklist Resolver downstream. Crucially, it is NOT
+  limited to statutes: case-law-only doctrines (e.g. "res judicata", "doctrine of
+  frustration") are valid keys, so they don't fall through the cracks.
+- **Checklist Resolver short-circuit.** When `query_type == test_application` but
+  the Researcher's regex (Pull C) finds zero provision matches, the Checklist
+  Resolver should short-circuit to empty rather than firing an LLM extraction call
+  with nothing to extract from. The `provision_key` from the Query Agent can seed
+  the lookup even if Pull C finds nothing.
 - **Regression suite:** `tests/test_query_agent.py` — offline (deterministic: don't-know
-  regex, cap computation, unknown-field plumbing, assembly) + live scripted multi-turn
-  cases A–E via `run_scripted(query, answers)`. B2 resolved to minimal-required (see
-  §2b required-field note); suite asserts the minimal-design invariants.
+  regex, cap computation, unknown-field plumbing, assembly, query_type/provision_key
+  plumbing, recommended_pipeline) + live scripted multi-turn cases A–F via
+  `run_scripted(query, answers)`. F1–F4 cover informational vs test_application
+  classification, provision_key for case-law doctrines, and mixed-type compounds.
+  B2 resolved to minimal-required (see §2b required-field note); suite asserts the
+  minimal-design invariants.
 
 ## 3. Key risks to watch for (hackathon-specific)
 
@@ -299,7 +329,8 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
     sub_questions: list[SubQuestion]   # Query Agent output — concrete schema in
                                          # agents/schemas.py (SubQuestion: id, text,
-                                         # complexity, relationship_type, depends_on,
+                                         # query_type, provision_key, complexity,
+                                         # relationship_type, depends_on,
                                          # known_facts, shared_context)
     evidence_pool: list[Chunk]          # Researcher output (Pulls A+B combined)
     surfaced_statutes: list[str]        # Pull C output
@@ -336,7 +367,7 @@ class State(TypedDict):
 
 | Component | Type | Status | Model |
 |---|---|---|---|
-| Query Agent | 🤖 Agent | ✅ Done — `agents/query_agent.py`, `agents/schemas.py`; clarify/resume loop with don't-know + 2-ask-cap handling (PART 1) and `unknown_fields` tracking. Scripted suite `tests/test_query_agent.py` (A–E). Entry `run_query_agent(...)` + `main.py` CLI; wraps cleanly for LangGraph | `llama-3.3-70b-versatile` (8B failed re-test, see §2b) |
+| Query Agent | 🤖 Agent | ✅ Done — `agents/query_agent.py`, `agents/schemas.py`; clarify/resume loop with don't-know + 2-ask-cap handling (PART 1) and `unknown_fields` tracking. Per-sub-question `query_type` classification (`test_application` / `informational`) drives downstream pipeline routing; `provision_key` (statute OR case-law doctrine) seeds Checklist Resolver lookup. Scripted suite `tests/test_query_agent.py` (A–F). Entry `run_query_agent(...)` + `main.py` CLI; wraps cleanly for LangGraph | `llama-3.3-70b-versatile` (8B failed re-test, see §2b) |
 | Researcher (Pull A/B) | ⚙️ Module | ⬜ Not started — blocked on teammate's RAG interface | n/a (calls teammate's functions) |
 | Researcher (Pull C) | ⚙️ Module | ⬜ Not started — regex extraction, independent, can build anytime | no LLM |
 | Checklist Resolver | ⚙️ Module | ⬜ Not started | `llama-3.3-70b-versatile` |
