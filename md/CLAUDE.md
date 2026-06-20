@@ -269,7 +269,11 @@ default `function_calling` method.
 
 - **Orchestration:** LangGraph (`StateGraph`) — agents are nodes, routing is conditional edges
 - **LLM provider:** Groq (`langchain_groq.ChatGroq`) — open-weight models only, free tier,
-  fastest inference available (LPU hardware). `GROQ_API_KEY` in `.env`.
+  fastest inference available (LPU hardware). Multiple keys (`GROQ_API_KEY`, `GROQ_API_KEY2`, …)
+  are rotated round-robin with per-key cooldown via `llm_keys.GROQ_POOL`; agents build their
+  structured LLM through `agents/llm_factory.build_rotating_structured_llm`, so a 429 on one key
+  rolls to the next and the effective daily budget is N× a single key (§3 risk 4). Gemini keys
+  (`GOOGLE_API_KEY*`, `GEMINI_POOL`) rotate identically — a `gemini-*` model id routes there.
 - **Structured output:** Pydantic models + `.with_structured_output(...)` for every agent that emits JSON
 - **Env/secrets:** `.env` + `python-dotenv`
 - **Package/env management:** `uv` — always `uv run <file>.py` / `uv add <package>`, never bare `pip`/`python`
@@ -280,12 +284,21 @@ don't default to the biggest model everywhere, and don't default to the smallest
 | Tier | Model (Groq) | Used by | Why this tier |
 |---|---|---|---|
 | Fast / simple | `llama-3.1-8b-instant` | — (Query Agent started here; re-tested 2026-06-20 and moved to Balanced — see §2b) | High-volume, low-ambiguity structured extraction — speed over deep reasoning. No current user; revisit if a cheaper agent appears |
-| Balanced | `llama-3.3-70b-versatile` | Query Agent (moved here after 8B failed tool-calling, §2b), Checklist Resolver (one-time extraction per provision), Adjudicator (final answer synthesis) | Needs solid reading comprehension / writing quality; Checklist Resolver calls are cached so cost is a one-time hit per provision, not per request |
-| Deep reasoning | `deepseek-r1-distill-llama-70b` | Auditor (fact-vs-checklist verification) | Highest-stakes step — false ✅/❌ here breaks the whole citation guarantee, worth spending the slower/more careful model here |
+| Balanced | `llama-3.3-70b-versatile` | Query Agent (moved here after 8B failed tool-calling, §2b), Checklist Resolver (one-time extraction per provision), Auditor (fact-vs-checklist verification — moved here from deep-reasoning 2026-06-20, see note), Adjudicator (final answer synthesis) | Needs solid reading comprehension / writing quality; Checklist Resolver calls are cached so cost is a one-time hit per provision, not per request |
+| Deep reasoning | `deepseek-r1-distill-llama-70b` | — (Auditor was assigned here; moved to Balanced 2026-06-20 — see note) | Reasoning model: slower, burns extra reasoning tokens, and less reliable for structured/tool output on Groq |
 | No LLM | — | Researcher Pull C (regex statute extraction) | Deliberately mechanical — see §7 |
 
 Re-evaluate this table if any agent's outputs look unreliable in testing — moving an
 agent up a tier is a one-line model-string change, not a refactor.
+
+**Auditor model note (2026-06-20):** moved from `deepseek-r1-distill-llama-70b` to
+`llama-3.3-70b-versatile`. The Auditor's correctness is gated by *code-owned*
+determination math (CRITICAL/optional + alt-group) and the don't-know/2-ask-cap loop —
+the model only judges each condition against the facts at `temperature=0`. The balanced
+70B does that reliably with the `function_calling` structured-output path already proven
+for the Query Agent, while being markedly faster and cheaper than the r1 reasoning model
+(which also tends to be flaky for tool/structured output on Groq). Overridable via
+`$AUDITOR_MODEL`; a `gemini-*` value transparently routes to the Gemini pool.
 
 ## 5. Integration contract with the RAG teammate
 
@@ -368,9 +381,9 @@ class State(TypedDict):
 | Component | Type | Status | Model |
 |---|---|---|---|
 | Query Agent | 🤖 Agent | ✅ Done — `agents/query_agent.py`, `agents/schemas.py`; clarify/resume loop with don't-know + 2-ask-cap handling (PART 1) and `unknown_fields` tracking. Per-sub-question `query_type` classification (`test_application` / `informational`) drives downstream pipeline routing; `provision_key` (statute OR case-law doctrine) seeds Checklist Resolver lookup. Scripted suite `tests/test_query_agent.py` (A–F). Entry `run_query_agent(...)` + `main.py` CLI; wraps cleanly for LangGraph | `llama-3.3-70b-versatile` (8B failed re-test, see §2b) |
-| Researcher (Pull A/B) | ⚙️ Module | ⬜ Not started — blocked on teammate's RAG interface | n/a (calls teammate's functions) |
-| Researcher (Pull C) | ⚙️ Module | ⬜ Not started — regex extraction, independent, can build anytime | no LLM |
+| Researcher (Pull A/B) | ⚙️ Module | ✅ Done — Integrated with teammate's `HybridRetriever` inside `agents/researcher.py` | n/a (calls teammate's functions) |
+| Researcher (Pull C) | ⚙️ Module | ✅ Done — Regex extraction matching civil sections/orders/rules with context-title act fallback. Offline suite `tests/test_researcher.py` passed. | no LLM |
 | Checklist Resolver | ⚙️ Module | ✅ Done — `agents/checklist_resolver.py`. Cache-backed module. Looks up provision from JSONs, caches mechanically by canonical key, falls back to one Gemini structured call on miss (grounded in the provision text). Returns `list[list[str]]` of grouped conditions. Demo via `demo_checklist.py`. | `gemini-2.0-flash` (separate budget) |
-| Auditor | 🤖 Agent | ⬜ Not started | `deepseek-r1-distill-llama-70b` |
-| Adjudicator | 🤖 Agent | ⬜ Not started | `llama-3.3-70b-versatile` |
+| Auditor | 🤖 Agent | ✅ Done — `agents/auditor.py` (+ shared `agents/llm_factory.py`). Verifies each checklist condition vs known facts (✅/❌/❓); **code** owns the CRITICAL/optional + alternative-group determination math and the clarify/resume loop (don't-know + 2-ask cap, mirrors Query Agent). Builds its structured LLM via the rotating key pools (`build_rotating_structured_llm`): Groq by default, a `gemini-*` override routes to the Gemini pool; a 429 rolls to the next key. Offline suite `tests/test_auditor.py` (31) + factory suite `tests/test_llm_factory.py` (15); live smoke verified. | `llama-3.3-70b-versatile` (rotated across `GROQ_POOL`; was `deepseek-r1-distill-llama-70b` — see §4 note) |
+| Adjudicator | 🤖 Agent | ✅ Done — `agents/adjudicator.py`. Synthesizes final legal answer, citations, options, and procedural vs substantive conflicts. Offline suite `tests/test_adjudicator.py` + live smoke verified. | `llama-3.3-70b-versatile` (rotated across `GROQ_POOL`) |
 | Graph wiring (LangGraph) | — | ⬜ Not started — prototype chatbot validated the pattern, real graph not yet built | n/a |

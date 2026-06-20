@@ -103,9 +103,17 @@ Do your job in this order:
       ["return of security deposit", "refund of overcharged maintenance", "recovery of
       advance rent"]. Do NOT collapse a genuinely multi-reading query into a single
       "what is the reason?" question.
-   c. jurisdiction — the query is incomplete in a way that MATERIALLY changes the
-      legal domain or jurisdiction (e.g. the answer depends on which State's CPC
-      amendments apply and that is unknown).
+   c. jurisdiction — fire ONLY when the answer is a state-determined NUMBER or
+      PROCEDURE that literally cannot be given without knowing the State, and no State
+      is stated. This is narrow: court fees, limitation periods, stamp duty, pecuniary
+      jurisdiction, or a specific State's CPC amendment. For these, the whole answer
+      changes with the State, so you must ask which State.
+      Do NOT fire jurisdiction for SUBSTANTIVE rights questions — eviction, security
+      deposit, contract validity, property, landlord-tenant rights, etc. Those have a
+      general civil-law framework that retrieval can answer, and any state-specific
+      nuance is gathered later downstream — proceed and split instead of asking for the
+      State. Example that must NOT trigger jurisdiction: "Can I recover my security
+      deposit and can my landlord evict me?" -> proceed to sub-questions.
    If none fire, set needs_clarification=False and split instead.
 
 4. SPLIT into sub-questions (only when not clarifying). DEFAULT TO NOT SPLITTING.
@@ -193,26 +201,14 @@ do have. Never ask about the same missing item more than twice.
 
 def build_structured_llm(model: Optional[str] = None) -> Any:
     """
-    Build a Groq chat model that returns a `QueryAnalysis` directly.
-
-    Model resolution: explicit `model` arg > $QUERY_AGENT_MODEL > DEFAULT_MODEL.
-    The env override lets us swap models without a code change (e.g. temporarily move
-    off a model whose daily token budget is exhausted, then revert by clearing it).
-
-    Reads GROQ_API_KEY from .env / environment. Raises a clear error if missing so
-    the failure is obvious rather than a generic auth error deep in a call.
+    Build a rotation-aware structured LLM that returns a `QueryAnalysis` directly.
+    Reads model from env/default, handles routing and rotation across API key pools.
     """
     load_dotenv()
-    if not os.environ.get("GROQ_API_KEY"):
-        raise RuntimeError(
-            "GROQ_API_KEY is not set. Add it to .env "
-            "(get a free key at https://console.groq.com/keys)."
-        )
     model = model or os.environ.get("QUERY_AGENT_MODEL") or DEFAULT_MODEL
-    from langchain_groq import ChatGroq
+    from .llm_factory import build_rotating_structured_llm
+    return build_rotating_structured_llm(QueryAnalysis, model)
 
-    llm = ChatGroq(model=model, temperature=0)
-    return llm.with_structured_output(QueryAnalysis)
 
 
 # ─────────────────────────────────────────────

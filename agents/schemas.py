@@ -20,7 +20,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ─────────────────────────────────────────────
@@ -85,10 +85,9 @@ class SubQuestionDraft(BaseModel):
     """One self-contained sub-question as emitted by the LLM (no shared context)."""
     text: str = Field(
         description=(
-            "A single, self-contained legal question. If the original query linked "
-            "ideas causally (e.g. a withheld deposit AND a retaliation complaint), "
-            "bake that link INTO this text so it reads completely on its own — do not "
-            "rely on the other sub-questions for meaning."
+            "A single, self-contained legal question. If the relationship_type is "
+            "'causal', you MUST embed that causal link or reason in this question text "
+            "itself (e.g. 'Is the rent increase valid, given that the tenant refused the request to vacate?')."
         )
     )
     query_type: QueryType = Field(
@@ -126,22 +125,32 @@ class SubQuestionDraft(BaseModel):
     relationship_type: RelationshipType = Field(
         description=(
             "How this sub-question relates to the others. Use 'independent' if it "
-            "stands alone, 'dependent' if it needs another sub-question's answer "
-            "first, 'causal' if it is linked to another by a cause/effect chain in "
-            "the original query. If there is only one sub-question, use 'independent'."
+            "stands alone. Set 'causal' if the user's query indicates that this "
+            "issue or action happened BECAUSE of or in response to another sub-question's "
+            "issue (e.g., rent raised because tenant refused to vacate). Set 'dependent' if "
+            "answering this question requires knowing the answer to another sub-question first."
         )
     )
     depends_on: List[int] = Field(
         default_factory=list,
         description=(
-            "1-based positions of the OTHER sub-questions in this list that must be "
-            "answered before this one. Empty if independent."
+            "1-based positions/indexes of the OTHER sub-questions in this list that "
+            "this question hinges on, is caused by, or must be answered before this one. "
+            "Must be populated if relationship_type is 'causal' or 'dependent'."
         ),
     )
     known_facts: List[str] = Field(
         default_factory=list,
         description="Facts from the user's query that are specifically relevant to THIS sub-question.",
     )
+
+    # Groq (esp. the smaller Llama models) sometimes emits `null` for an array field
+    # instead of omitting it or sending []. `default_factory` only fills MISSING keys,
+    # so an explicit null would raise a validation error — coerce it to [] here.
+    @field_validator("depends_on", "known_facts", mode="before")
+    @classmethod
+    def _none_to_empty_list(cls, v):
+        return [] if v is None else v
 
 
 class QueryAnalysis(BaseModel):
@@ -159,7 +168,7 @@ class QueryAnalysis(BaseModel):
             "If the query is already clear, repeat it cleaned up."
         )
     )
-    extracted_facts: List[str] = Field(
+    extracted_facts: Optional[List[str]] = Field(
         default_factory=list,
         description=(
             "All concrete facts present in the user's input, extracted before any "
@@ -192,7 +201,7 @@ class QueryAnalysis(BaseModel):
             "needs_clarification is True, else null."
         ),
     )
-    options: List[str] = Field(
+    options: Optional[List[str]] = Field(
         default_factory=list,
         description=(
             "Only for clarification_kind='ambiguous': the distinct interpretations to "
@@ -200,7 +209,7 @@ class QueryAnalysis(BaseModel):
             "notice']). Empty otherwise."
         ),
     )
-    sub_questions: List[SubQuestionDraft] = Field(
+    sub_questions: Optional[List[SubQuestionDraft]] = Field(
         default_factory=list,
         description=(
             "The clean, split sub-questions to send downstream. Fill this ONLY when "
@@ -208,7 +217,7 @@ class QueryAnalysis(BaseModel):
             "a compound one."
         ),
     )
-    unknown_fields: List[str] = Field(
+    unknown_fields: Optional[List[str]] = Field(
         default_factory=list,
         description=(
             "Information you ASKED the user for but they could not provide, so you are "
@@ -219,6 +228,16 @@ class QueryAnalysis(BaseModel):
             "user was asked about and could not fill."
         ),
     )
+
+    # Groq sometimes emits `null` for an array field instead of [] (CLAUDE.md §2b).
+    # `default_factory` only fills MISSING keys, so an explicit null would raise a
+    # validation error mid-call — coerce every list field to [] before validation.
+    @field_validator(
+        "extracted_facts", "options", "sub_questions", "unknown_fields", mode="before"
+    )
+    @classmethod
+    def _none_to_empty_list(cls, v):
+        return [] if v is None else v
 
 
 # ─────────────────────────────────────────────
@@ -370,4 +389,229 @@ class ChecklistResult(BaseModel):
     group_labels: List[str] = Field(default_factory=list)
     source: str = ""                  # "cache" | "llm" | "not_found"
     provision_text_snippet: str = ""  # First ~200 chars of matched doc (debug)
+
+
+# ─────────────────────────────────────────────
+# Auditor schemas (CLAUDE.md §2, §2a, §6, §7)
+# ─────────────────────────────────────────────
+
+class AuditStatus(str, Enum):
+    """
+    Per-condition verdict the Auditor assigns when checking a checklist
+    condition against the user's known facts (CLAUDE.md §2):
+      • satisfied — the known facts clearly establish the condition IS met
+      • failed    — the known facts clearly establish the condition is NOT met
+      • unknown   — the facts are silent/insufficient -> candidate for a question to the user
+    """
+    SATISFIED = "satisfied"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+# ─────────────────────────────────────────────
+# LLM-facing draft (bound to with_structured_output)
+# ─────────────────────────────────────────────
+
+class ConditionVerdict(BaseModel):
+    """One verdict for one numbered checklist condition, emitted by the LLM."""
+    index: int = Field(
+        description=(
+            "The 1-based index of the condition being judged. It MUST match the "
+            "number shown next to that condition in the checklist you were given. "
+            "Return exactly one verdict per numbered condition."
+        )
+    )
+    status: AuditStatus = Field(
+        description=(
+            "satisfied = the KNOWN FACTS clearly establish this condition is met; "
+            "failed = the known facts clearly establish this condition is NOT met; "
+            "unknown = the facts are silent or insufficient to decide either way. "
+            "Do NOT guess: if the facts do not address the condition, it is 'unknown', "
+            "never a guessed 'satisfied'/'failed'."
+        )
+    )
+    rationale: str = Field(
+        description=(
+            "One short sentence. For satisfied/failed: cite the specific known fact "
+            "that decides it. For unknown: state exactly what fact is missing."
+        )
+    )
+
+
+class AuditAssessment(BaseModel):
+    """
+    Single-call Auditor output: a verdict for every checklist condition, plus the
+    single most pivotal follow-up question when an UNKNOWN blocks a determination.
+    The decision of WHETHER to surface that question (and the satisfied/failed/applies
+    math) is owned by code, not the model — see auditor.py.
+    """
+    verdicts: List[ConditionVerdict] = Field(
+        description=(
+            "Exactly one verdict per numbered condition you were given (any order). "
+            "Do NOT invent conditions that were not listed."
+        )
+    )
+    next_question: Optional[str] = Field(
+        default=None,
+        description=(
+            "If one or more conditions are UNKNOWN and learning that fact could change "
+            "whether the provision applies, write the SINGLE most pivotal, specific "
+            "question to put to the user. Ask for ONE concrete fact in plain language "
+            "(e.g. 'Did you deliver a written notice to the government at least two "
+            "months before filing the suit, and to which officer?'). Null if nothing "
+            "is unknown, or no answer could change the outcome."
+        ),
+    )
+    next_question_index: Optional[int] = Field(
+        default=None,
+        description=(
+            "The index of the condition your next_question is trying to resolve. "
+            "Null when next_question is null."
+        ),
+    )
+
+
+# ─────────────────────────────────────────────
+# Final public shapes (returned by run_auditor)
+# ─────────────────────────────────────────────
+
+class AuditedCondition(BaseModel):
+    """One checklist condition with the Auditor's verdict attached."""
+    group_label: str = ""
+    text: str
+    critical: bool = False
+    alternative_group: Optional[str] = None
+    status: AuditStatus
+    rationale: str = ""
+
+
+class AuditResult(BaseModel):
+    """
+    The Auditor's return value. Exactly one of two states (mirrors QueryAgentResult):
+      • status='complete' → determination + buckets filled; safe to send the
+                            surviving_set to the Adjudicator.
+      • status='clarify'  → pending_question filled; caller asks the user, appends
+                            {question, answer, condition} to history, and re-invokes
+                            (the resume loop → a LangGraph interrupt later).
+    """
+    status: str  # "clarify" | "complete"
+    provision_key: str = ""
+
+    # Set when status == "complete":
+    #   "applies"       — every CRITICAL condition is satisfied (provision applies)
+    #   "fails"         — a CRITICAL condition failed (provision cannot apply)
+    #   "indeterminate" — a critical condition stayed unknown (user couldn't supply it)
+    #   "no_checklist"  — nothing to audit (empty checklist came in)
+    determination: Optional[str] = None
+
+    # Verdict buckets — populated on BOTH states (snapshot on clarify, final on complete).
+    satisfied: List[AuditedCondition] = Field(default_factory=list)
+    failed: List[AuditedCondition] = Field(default_factory=list)
+    unknown: List[AuditedCondition] = Field(default_factory=list)
+
+    # The verified surviving set handed to the Adjudicator (the satisfied conditions —
+    # every downstream claim must trace back to one of these). Filled on complete.
+    surviving_set: List[AuditedCondition] = Field(default_factory=list)
+
+    # Populated only when status == "clarify":
+    pending_question: Optional[str] = None
+    pending_condition: Optional[str] = None   # condition text the question targets (cap attribution)
+
+    # Always populated — visibility into what the audit used / has asked.
+    known_facts: List[str] = Field(default_factory=list)
+    asked: List[str] = Field(default_factory=list)
+
+    @property
+    def is_complete(self) -> bool:
+        return self.status == "complete"
+
+
+# ─────────────────────────────────────────────
+# Adjudicator schemas (CLAUDE.md §2, §2a, §6, §7)
+# ─────────────────────────────────────────────
+
+class SubAnswer(BaseModel):
+    """The conclusion, reasoning, and citations for a single sub-question."""
+    sub_question_id: int = Field(
+        description="The 1-based ID of the sub-question being answered."
+    )
+    conclusion: str = Field(
+        description="Brief legal conclusion for this specific sub-question."
+    )
+    reasoning: str = Field(
+        description=(
+            "Detailed legal reasoning for this sub-question. Must be fully "
+            "grounded in the surviving verified conditions (if test_application) "
+            "or retrieved evidence chunks (if informational). You must explain "
+            "which conditions were satisfied or failed, or what information from "
+            "the evidence pool resolves the procedural/informational query."
+        )
+    )
+    citations: List[str] = Field(
+        default_factory=list,
+        description=(
+            "A list of specific statutory sections, case citations, rule titles, "
+            "or condition texts that support the reasoning."
+        )
+    )
+
+    # Coerce None to empty list
+    @field_validator("citations", mode="before")
+    @classmethod
+    def _none_to_empty_list(cls, v):
+        return [] if v is None else v
+
+
+class LegalOption(BaseModel):
+    """An alternative legal path, scenario, or option depending on the circumstances."""
+    title: str = Field(
+        description="Title of this legal path or option (e.g. 'Option A: Seek stay of suit', 'Option B: Admit liability')."
+    )
+    description: str = Field(
+        description="Detailed explanation of the legal path, its viability, and the likely outcome."
+    )
+    citations: List[str] = Field(
+        default_factory=list,
+        description="Citations supporting this specific legal path or option."
+    )
+
+    # Coerce None to empty list
+    @field_validator("citations", mode="before")
+    @classmethod
+    def _none_to_empty_list(cls, v):
+        return [] if v is None else v
+
+
+class AdjudicationResult(BaseModel):
+    """
+    Top-level structured output of the Adjudicator agent. Emitted as a single
+    structured JSON call.
+    """
+    ultimate_verdict: str = Field(
+        description="The ultimate overall legal verdict or summary of the case (1-2 paragraphs)."
+    )
+    sub_answers: List[SubAnswer] = Field(
+        description="Individual answers for each sub-question."
+    )
+    options: List[LegalOption] = Field(
+        default_factory=list,
+        description=(
+            "If there are multiple legal options or paths depending on the "
+            "surviving verified items or evidence, list them here. Otherwise empty."
+        )
+    )
+    synthesis_and_conflicts: str = Field(
+        description=(
+            "A detailed synthesis of all sub-answers, explaining how they link "
+            "(causal, dependent) and resolving any conflicts or overlaps between "
+            "provisions (e.g., procedural CPC stays vs substantive rights)."
+        )
+    )
+
+    # Coerce None to empty list
+    @field_validator("sub_answers", "options", mode="before")
+    @classmethod
+    def _none_to_empty_list(cls, v):
+        return [] if v is None else v
+
 

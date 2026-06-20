@@ -379,32 +379,14 @@ RULES:
 
 def _build_extraction_llm(model: str | None = None) -> Any:
     """
-    Build a Google Gemini chat model that returns a ChecklistExtraction.
-
-    Reads GOOGLE_API_KEY from .env / environment.
-    Falls back to Groq if GOOGLE_API_KEY is not set but GROQ_API_KEY is.
+    Build a rotation-aware structured LLM that returns a ChecklistExtraction.
+    Reads model from env/default, handles routing and rotation across API key pools.
     """
     load_dotenv()
     model = model or os.environ.get("CHECKLIST_MODEL") or _DEFAULT_MODEL
+    from .llm_factory import build_rotating_structured_llm
+    return build_rotating_structured_llm(ChecklistExtraction, model)
 
-    google_key = os.environ.get("GOOGLE_API_KEY")
-    if google_key:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        llm = ChatGoogleGenerativeAI(model=model, temperature=0)
-        return llm.with_structured_output(ChecklistExtraction)
-
-    # Fallback: Groq
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if groq_key:
-        from langchain_groq import ChatGroq
-        fallback_model = os.environ.get("CHECKLIST_MODEL") or "llama-3.3-70b-versatile"
-        llm = ChatGroq(model=fallback_model, temperature=0)
-        return llm.with_structured_output(ChecklistExtraction)
-
-    raise RuntimeError(
-        "Neither GOOGLE_API_KEY nor GROQ_API_KEY is set. "
-        "Add GOOGLE_API_KEY to .env (free key: https://aistudio.google.com/apikey)."
-    )
 
 
 # ─────────────────────────────────────────────
