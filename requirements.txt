@@ -27,8 +27,10 @@ litellm>=1.89
 # Testing
 pytest>=9.0
 
-# ── Optional ──
-# Only needed for local voyage-4-nano query mode (QUERY_EMBED_MODE=nano).
-# The default "large" query mode uses the Voyage API and does NOT need these.
-# sentence-transformers>=3.0
-# torch>=2.2
+# Note: voyageai pulls in langchain-text-splitters -> sentence-transformers ->
+# transformers/torch transitively, so those install automatically. We never load a
+# local model in the default "large" query mode; config.py sets USE_TF=0 up front so
+# the transformers import doesn't trip over a TensorFlow/Keras-3 backend.
+#
+# Only if you switch to local nano query mode (QUERY_EMBED_MODE=nano) do you actually
+# *use* sentence-transformers at runtime; no extra install is needed for it.
