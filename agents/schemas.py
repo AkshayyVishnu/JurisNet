@@ -338,18 +338,6 @@ class ChecklistGroup(BaseModel):
             "critical flag. Extract ONLY from the provision text."
         )
     )
-    applies_only_if: Optional[str] = Field(
-        default=None,
-        description=(
-            "If this entire group of conditions only applies under a "
-            "specific factual precondition (e.g. 'plaintiff is claiming "
-            "urgent or immediate relief', 'sale is adjourned for more "
-            "than thirty days'), state that precondition here. The "
-            "Auditor must check this gating condition FIRST before "
-            "evaluating any conditions in this group. null if the group "
-            "applies unconditionally."
-        )
-    )
 
 
 class ChecklistExtraction(BaseModel):
@@ -380,7 +368,6 @@ class ChecklistResult(BaseModel):
     canonical_key: str = ""           # Normalized cache key
     checklist: List[List[ChecklistCondition]] = Field(default_factory=list)
     group_labels: List[str] = Field(default_factory=list)
-    group_gates: List[Optional[str]] = Field(default_factory=list)  # applies_only_if per group
     source: str = ""                  # "cache" | "llm" | "not_found"
     provision_text_snippet: str = ""  # First ~200 chars of matched doc (debug)
 

@@ -51,10 +51,8 @@ def run_demo():
               f"{num_groups} groups, {num_conds} conditions)")
               
         # Print the actual extracted checklist
-        for i, (label, group) in enumerate(zip(result.group_labels, result.checklist)):
-            gate = result.group_gates[i] if i < len(result.group_gates) else None
-            gate_str = f" (IF: {gate})" if gate else ""
-            print(f"  [{label}]{gate_str}")
+        for label, group in zip(result.group_labels, result.checklist):
+            print(f"  [{label}]")
             for condition in group:
                 flag = "CRITICAL" if condition.critical else "optional"
                 alt = f" (alt: {condition.alternative_group})" if condition.alternative_group else ""

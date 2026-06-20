@@ -179,7 +179,6 @@ def _init_cache(db_path: str) -> sqlite3.Connection:
             provision_key TEXT NOT NULL,
             checklist_json TEXT NOT NULL,
             group_labels_json TEXT NOT NULL,
-            group_gates_json TEXT NOT NULL DEFAULT '[]',
             provision_snippet TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
@@ -191,8 +190,7 @@ def _init_cache(db_path: str) -> sqlite3.Connection:
 def _cache_get(conn: sqlite3.Connection, canonical_key: str) -> ChecklistResult | None:
     """Lookup a cached checklist by canonical key."""
     row = conn.execute(
-        "SELECT provision_key, checklist_json, group_labels_json, "
-        "group_gates_json, provision_snippet "
+        "SELECT provision_key, checklist_json, group_labels_json, provision_snippet "
         "FROM checklists WHERE canonical_key = ?",
         (canonical_key,),
     ).fetchone()
@@ -209,9 +207,8 @@ def _cache_get(conn: sqlite3.Connection, canonical_key: str) -> ChecklistResult 
         canonical_key=canonical_key,
         checklist=checklist,
         group_labels=json.loads(row[2]),
-        group_gates=json.loads(row[3]),
         source="cache",
-        provision_text_snippet=row[4],
+        provision_text_snippet=row[3],
     )
 
 
@@ -219,15 +216,13 @@ def _cache_put(conn: sqlite3.Connection, result: ChecklistResult) -> None:
     """Insert or replace a checklist in the cache."""
     conn.execute(
         "INSERT OR REPLACE INTO checklists "
-        "(canonical_key, provision_key, checklist_json, group_labels_json, "
-        "group_gates_json, provision_snippet) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(canonical_key, provision_key, checklist_json, group_labels_json, provision_snippet) "
+        "VALUES (?, ?, ?, ?, ?)",
         (
             result.canonical_key,
             result.provision_key,
             json.dumps([[c.model_dump() for c in group] for group in result.checklist]),
             json.dumps(result.group_labels),
-            json.dumps(result.group_gates),
             result.provision_text_snippet,
         ),
     )
@@ -371,17 +366,10 @@ RULES:
    assign all alternatives the SAME "alternative_group" tag string (e.g.
    "stoppage_alternatives") so the Auditor knows only ONE needs to be
    satisfied. Set "alternative_group": null for standalone conditions.
-8. CONDITIONAL GROUPS: if an entire sub-section only applies under a
-   specific factual precondition (e.g. sub-section (2) only applies when
-   "plaintiff is claiming urgent or immediate relief", or a rule only
-   applies when "sale is adjourned for more than thirty days"), set the
-   group's "applies_only_if" to that precondition string. The Auditor
-   must check this gate FIRST before evaluating the group's conditions.
-   Set "applies_only_if": null for unconditionally-applicable groups.
-9. Extract ONLY from the text below. Do not add conditions not present
+8. Extract ONLY from the text below. Do not add conditions not present
    in the text.
-10. Ignore High Court Amendments sections — focus on the main provision
-    text only.
+9. Ignore High Court Amendments sections — focus on the main provision
+   text only.
 
 --- PROVISION TEXT ---
 {provision_body}
@@ -496,7 +484,6 @@ def resolve_checklist(
             canonical_key=canonical,
             checklist=[g.conditions for g in extraction.groups],
             group_labels=[g.group_label for g in extraction.groups],
-            group_gates=[g.applies_only_if for g in extraction.groups],
             source="llm",
             provision_text_snippet=snippet,
         )
