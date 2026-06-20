@@ -45,6 +45,12 @@ Usage:
     # plan.query_mode → "INFORMATIONAL" (skip Counsel pair)
 """
 
+import os
+# Disable transformers' TF/Flax backends (Keras 3 conflict) before any import
+# chain (voyageai → sentence-transformers → transformers) is triggered.
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_FLAX", "0")
+
 from dataclasses import dataclass, field
 from typing import List, Optional, Any
 from graph_ranker import get_rrf_weights
@@ -85,6 +91,46 @@ def embed_with_nano(text: str, model: Any, truncate_dim: int = 1024) -> List[flo
     if truncate_dim and truncate_dim < len(vector):
         vector = vector[:truncate_dim]
     return vector.tolist()
+
+
+def embed_with_large(text: str, voyage_api_key: str, truncate_dim: int = 1024) -> List[float]:
+    """
+    Embed a single query using voyage-4-large via API (input_type="query").
+
+    Use this when you don't want to run nano locally — same shared space as the
+    voyage-4-large-indexed documents, so vectors are directly comparable.
+    Costs one API call PER query (counts against your Voyage quota) and is subject
+    to the API rate limit, unlike local nano. Same model family + dim = compatible.
+    """
+    import voyageai
+    client = voyageai.Client(api_key=voyage_api_key)
+    result = client.embed(
+        [text],
+        model="voyage-4-large",
+        input_type="query",
+        output_dimension=truncate_dim,
+    )
+    return result.embeddings[0]
+
+
+def embed_query_vector(
+    query: str,
+    *,
+    mode: str = "nano",
+    nano_model: Any = None,
+    voyage_api_key: Optional[str] = None,
+    truncate_dim: int = 1024,
+) -> List[float]:
+    """Dispatch to nano (local) or large (API) embedding based on `mode`."""
+    if mode == "nano":
+        if nano_model is None:
+            raise ValueError("mode='nano' requires a loaded nano_model (load_local_nano()).")
+        return embed_with_nano(query, nano_model, truncate_dim)
+    if mode == "large":
+        if not voyage_api_key:
+            raise ValueError("mode='large' requires voyage_api_key.")
+        return embed_with_large(query, voyage_api_key, truncate_dim)
+    raise ValueError(f"Unknown query embed mode: {mode!r} (expected 'nano' or 'large').")
 
 
 # ─────────────────────────────────────────────
@@ -173,23 +219,33 @@ QUERY_ROUTES: dict[str, dict] = {
 def embed_query(
     query: str,
     intent: str,
-    nano_model: Any,
+    nano_model: Any = None,
     truncate_dim: int = 1024,
+    mode: str = "nano",
+    voyage_api_key: Optional[str] = None,
 ) -> QueryPlan:
     """
-    Embed query with local voyage-4-nano and build the query plan.
+    Embed query and build the query plan.
 
     Args:
         query:        User's legal query text
         intent:       Intent from Query Understanding Agent
-        nano_model:   Loaded SentenceTransformer model (call load_local_nano() once at startup)
+        nano_model:   Loaded SentenceTransformer model (required when mode="nano")
         truncate_dim: Must match dimension of your Qdrant collections (default 1024)
+        mode:         "nano" (local model) or "large" (Voyage API). See config.QUERY_EMBED_MODE.
+        voyage_api_key: Required when mode="large".
     """
     route = QUERY_ROUTES.get(intent.upper(), QUERY_ROUTES["DEFAULT"])
 
     # Embed once — same vector searches both content + label collections
-    # (because both were indexed with voyage-4-large in the shared embedding space)
-    query_vector = embed_with_nano(query, nano_model, truncate_dim)
+    # (both indexed with voyage-4-large; query model shares that space)
+    query_vector = embed_query_vector(
+        query,
+        mode=mode,
+        nano_model=nano_model,
+        voyage_api_key=voyage_api_key,
+        truncate_dim=truncate_dim,
+    )
 
     plan = QueryPlan(
         query_text     = query,

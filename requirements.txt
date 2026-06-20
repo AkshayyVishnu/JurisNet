@@ -1,0 +1,36 @@
+# JurisNet dependencies — Python 3.10–3.12 recommended.
+# Install:  pip install -r requirements.txt
+
+# ── Core / config ──
+python-dotenv>=1.0.1
+numpy>=1.26,<3.0
+
+# ── Chunking ──
+beautifulsoup4>=4.12.3          # chunker.py (BeautifulSoup)
+lxml>=5.2.0                     # fast parser backend for BeautifulSoup
+
+# ── Embeddings ──
+voyageai>=0.3.0                 # voyage-4-large (document indexing, API)
+sentence-transformers>=3.0.0   # voyage-4-nano local query embedding
+# torch is pulled in by sentence-transformers; pin here if you need a CUDA build.
+torch>=2.2.0
+
+# ── Vector store ──
+qdrant-client>=1.9.0
+
+# ── Graph store ──
+neo4j>=5.20.0
+
+# ── Full-text search ──
+# SQLite FTS5 ships with CPython's stdlib sqlite3 — no package needed.
+
+# ── Agent framework + LLM gateway ──
+langgraph>=0.2.0
+litellm>=1.40.0
+
+# ── LLM provider SDKs (keys rotated via llm_keys.py) ──
+groq>=0.9.0                     # Query Understanding + Citation Verifier
+google-genai>=0.3.0            # Gemini 2.5 Flash (Synthesis)
+
+# ── Testing ──
+pytest>=8.2.0
