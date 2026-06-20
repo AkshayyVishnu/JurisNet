@@ -1,11 +1,22 @@
-# Secrets
+# Secrets — never commit
 .env
+
+# Chunker output
+chunks/
 
 # Python
 __pycache__/
 *.py[cod]
-.venv/
 *.egg-info/
+.venv/
+venv/
+
+# Local stores / data dumps
+qdrant_storage/
+neo4j_data/
+*.db
+*.sqlite
+*.sqlite3
 
 # Caches
 .pytest_cache/

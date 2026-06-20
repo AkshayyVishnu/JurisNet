@@ -1,5 +1,10 @@
 # 🛠️ JurisNet — Implementation Plan & To-Do
 
+> ⚠️ **Chunking superseded:** Phase 1 below assumed the raw Indian Kanoon API schema.
+> The real `LEGAL_DATA` schema differs (flat text, no section labels, pre-resolved
+> citation IDs). For the authoritative chunking design see **`PIPELINE_STAGES.md`**
+> (Stage A structural / Stage B LLM enrichment / Stage C corpus expansion).
+
 > Created: Session 2 — June 20, 2026
 > Scope: Take the 4 built modules → a working end-to-end legal RAG with **4 agents**.
 > Priority order (per user): **Chunking → Embedding → Retrieval → Pipeline**, agents last.
