@@ -87,16 +87,22 @@ def iter_chunks():
                        title=title, court=meta["court"], date=meta["date"],
                        disposition=meta["disposition"])
 
-    # Provisions -> label collection
-    for p in sorted(config.CHUNKS_PROVISIONS_DIR.glob("*.json")):
-        d = _load(p)
+    # Provisions + Rules -> label collection (both are provision-like)
+    def _provision_rec(d, chunk_type, suffix):
         pv = d["provision"]
         tid = pv["tid"]
         aliases = "; ".join(pv.get("aliases", []))
         embed_text = f"{pv['section_ref']} {pv['act_name']}. {aliases}. {pv['text']}".strip()
-        yield _rec(LABEL, f"{tid}:STATUTE", "statute_provision", tid, embed_text,
-                   title=pv["title"], section_ref=pv["section_ref"], act_name=pv["act_name"],
-                   aliases=pv.get("aliases", []))
+        return _rec(LABEL, f"{tid}:{suffix}", chunk_type, tid, embed_text,
+                    title=pv["title"], section_ref=pv["section_ref"], act_name=pv["act_name"],
+                    aliases=pv.get("aliases", []))
+
+    for p in sorted(config.CHUNKS_PROVISIONS_DIR.glob("*.json")):
+        yield _provision_rec(_load(p), "statute_provision", "STATUTE")
+
+    if config.CHUNKS_RULES_DIR.exists():  # Stage C
+        for p in sorted(config.CHUNKS_RULES_DIR.glob("*.json")):
+            yield _provision_rec(_load(p), "rule_provision", "RULE")
 
 
 # ─────────────────────────────────────────────

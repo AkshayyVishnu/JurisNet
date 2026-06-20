@@ -49,15 +49,31 @@ def load_graph(driver, wipe: bool = False) -> dict:
             "act_name": pv.get("act_name", ""),
         }})
 
+    rrows = []  # Stage C: CPC Orders & Rules
+    if config.CHUNKS_RULES_DIR.exists():
+        for p in sorted(config.CHUNKS_RULES_DIR.glob("*.json")):
+            pv = _load(p)["provision"]
+            rrows.append({"tid": int(pv["tid"]), "props": {
+                "title": pv.get("title", ""), "section_ref": pv.get("section_ref", ""),
+                "act_name": pv.get("act_name", ""),
+            }})
+
     edges = _load(config.CITATION_EDGES_FILE) if config.CITATION_EDGES_FILE.exists() else []
     erows = [{"from_tid": int(e["from_tid"]), "to_tid": int(e["to_tid"]), "rel_type": e["rel_type"]}
              for e in edges if e.get("to_tid") is not None]
+    # judgment -> rule edges (Stage C)
+    if config.RULE_EDGES_FILE.exists():
+        for e in _load(config.RULE_EDGES_FILE):
+            if e.get("to_tid") is not None:
+                erows.append({"from_tid": int(e["from_tid"]), "to_tid": int(e["to_tid"]),
+                              "rel_type": e["rel_type"]})
 
     with driver.session() as s:
         if wipe:
             s.run("MATCH (n) DETACH DELETE n")
         s.run("CREATE INDEX judg_tid IF NOT EXISTS FOR (n:Judgment) ON (n.tid)")
         s.run("CREATE INDEX stat_tid IF NOT EXISTS FOR (n:Statute) ON (n.tid)")
+        s.run("CREATE INDEX rule_tid IF NOT EXISTS FOR (n:Rule) ON (n.tid)")
 
         for i in range(0, len(jrows), 1000):
             s.run("UNWIND $rows AS r MERGE (d:Judgment {tid:r.tid}) SET d += r.props",
@@ -65,6 +81,9 @@ def load_graph(driver, wipe: bool = False) -> dict:
         for i in range(0, len(srows), 1000):
             s.run("UNWIND $rows AS r MERGE (n:Statute {tid:r.tid}) SET n += r.props",
                   rows=srows[i:i + 1000])
+        for i in range(0, len(rrows), 1000):
+            s.run("UNWIND $rows AS r MERGE (n:Rule {tid:r.tid}) SET n += r.props",
+                  rows=rrows[i:i + 1000])
 
         loaded_edges = 0
         for i in range(0, len(erows), 5000):
@@ -83,7 +102,7 @@ def load_graph(driver, wipe: bool = False) -> dict:
         m = s.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
 
     return {"nodes": n, "relationships": m, "judgments": len(jrows),
-            "statutes": len(srows), "edges_loaded": loaded_edges}
+            "statutes": len(srows), "rules": len(rrows), "edges_loaded": loaded_edges}
 
 
 def traverse(driver, seed_tids: list[int], max_hops: int = 2) -> list[GraphNode]:

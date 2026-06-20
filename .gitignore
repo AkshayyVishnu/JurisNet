@@ -17,17 +17,6 @@ neo4j_data/
 *.db
 *.sqlite
 *.sqlite3
-
-# Caches
-.pytest_cache/
-.ruff_cache/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Claude Code local state
-.claude/
-
-# Caches
-checklist_cache.db
+# Node / frontend build
+node_modules/
+frontend/dist/
