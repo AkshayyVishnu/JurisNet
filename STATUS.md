@@ -20,6 +20,11 @@
 - SQLite FTS5: full corpus, legal-token normalized
 - Neo4j Aura: 1,071 nodes + 6,776 edges (judgment↔statute↔rule)
 
+**Web UI**
+- Backend API — `server.py` (FastAPI): `/api/ask` (SSE: streams stages + tokens + verification), `/api/suggestions`, `/api/architecture` (live stats)
+- Frontend — `frontend/` (React + Vite + Tailwind): suggested chips, live stage tracker, streaming answer with clickable citations, sources panel + confidence badge, architecture showcase
+- Run: `uvicorn server:app --port 8000` + `cd frontend && npm run dev` → http://localhost:5173
+
 **Agents (4-agent MVP)**
 - Query Understanding (intent) — `agents/query_understanding.py`
 - Hybrid Retriever (4 sources + RRF) — `retrieval/hybrid_retriever.py`

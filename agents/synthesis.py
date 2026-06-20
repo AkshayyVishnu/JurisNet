@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from agents.llm import chat  # noqa: E402
+from agents.llm import chat, chat_stream  # noqa: E402
 
 _SYSTEM = """You are JurisNet, an Indian CIVIL-law research assistant. Answer using ONLY the \
 provided context excerpts — no outside knowledge, no invented cases or sections.
@@ -40,8 +40,23 @@ def synthesize(query: str, results: list[dict], max_chunks: int = 12,
     if not results:
         return ("I couldn't find relevant material in the corpus for this question.\n\n"
                 "_This is general legal information, not legal advice._")
+    return chat(_build_prompt(query, results, max_chunks, per_chunk_chars),
+                system=_SYSTEM, max_tokens=2000, temperature=0.2)
+
+
+def _build_prompt(query, results, max_chunks, per_chunk_chars) -> str:
     context = _format_context(results, max_chunks, per_chunk_chars)
-    prompt = (f"CONTEXT EXCERPTS:\n{context}\n\n"
-              f"QUESTION: {query}\n\n"
-              "Write the IRAC answer now, citing [tid …] for every legal claim.")
-    return chat(prompt, system=_SYSTEM, max_tokens=2000, temperature=0.2)
+    return (f"CONTEXT EXCERPTS:\n{context}\n\n"
+            f"QUESTION: {query}\n\n"
+            "Write the IRAC answer now, citing [tid …] for every legal claim.")
+
+
+def synthesize_stream(query: str, results: list[dict], max_chunks: int = 12,
+                      per_chunk_chars: int = 1200):
+    """Yield answer tokens. Caller accumulates the full text, then verifies it."""
+    if not results:
+        yield ("I couldn't find relevant material in the corpus for this question.\n\n"
+               "_This is general legal information, not legal advice._")
+        return
+    yield from chat_stream(_build_prompt(query, results, max_chunks, per_chunk_chars),
+                           system=_SYSTEM, max_tokens=2000, temperature=0.2)

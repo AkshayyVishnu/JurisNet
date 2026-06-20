@@ -54,6 +54,37 @@ def chat(prompt: str, system: str | None = None, json_mode: bool = False,
     raise last or RuntimeError("all LLM providers failed")
 
 
+def chat_stream(prompt: str, system: str | None = None,
+                max_tokens: int = 2000, temperature: float = 0.2):
+    """Yield answer tokens as they arrive. Falls through providers if one fails
+    before producing any token; once a provider starts streaming we commit to it."""
+    msgs = ([{"role": "system", "content": system}] if system else []) + \
+           [{"role": "user", "content": prompt}]
+    last: Exception | None = None
+    for model, pool, cooldown in _CHAIN:
+        if len(pool) == 0:
+            continue
+        key = pool.next()
+        try:
+            stream = litellm.completion(model=model, messages=msgs, api_key=key,
+                                        temperature=temperature, max_tokens=max_tokens,
+                                        stream=True)
+            produced = False
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    produced = True
+                    yield delta
+            if produced:
+                return
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if _is_rate_limit(e):
+                pool.penalize(key, cooldown)
+            continue
+    raise last or RuntimeError("all LLM providers failed (stream)")
+
+
 def parse_json(text: str) -> dict:
     """Tolerant JSON parse: strip code fences / surrounding prose."""
     t = text.strip()

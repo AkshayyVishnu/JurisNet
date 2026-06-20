@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+:root {
+  --accent: #4f46e5;        /* single accent (indigo-600) */
+  --accent-soft: #eef2ff;
+  --ink: #0a0a0a;
+  --muted: #6b7280;
+  --line: #e7e7e9;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: #ffffff;
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, Inter, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Answer (markdown) typography */
+.prose-legal { line-height: 1.7; color: #18181b; }
+.prose-legal p { margin: 0 0 0.9rem; }
+.prose-legal strong { color: #000; font-weight: 650; }
+.prose-legal h1, .prose-legal h2, .prose-legal h3 { font-weight: 650; margin: 1.2rem 0 0.5rem; }
+.prose-legal ol, .prose-legal ul { margin: 0 0 0.9rem 1.2rem; }
+.prose-legal li { margin: 0.25rem 0; }
+.prose-legal em { color: var(--muted); }
+
+/* thin scrollbars */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 8px; }

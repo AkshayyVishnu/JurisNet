@@ -17,3 +17,7 @@ neo4j_data/
 *.db
 *.sqlite
 *.sqlite3
+
+# Node / frontend build
+node_modules/
+frontend/dist/
