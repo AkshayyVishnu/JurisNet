@@ -24,6 +24,7 @@ except Exception:  # noqa: BLE001
 from retrieval.hybrid_retriever import HybridRetriever  # noqa: E402
 from agents.query_understanding import understand  # noqa: E402
 from agents.synthesis import synthesize  # noqa: E402
+from agents import citation_verifier  # noqa: E402
 
 
 def answer(query: str, retriever: HybridRetriever, top_k: int = 15) -> None:
@@ -38,9 +39,13 @@ def answer(query: str, retriever: HybridRetriever, top_k: int = 15) -> None:
         print("\nNo relevant material found.")
         return
 
+    draft = synthesize(query, results)
+    v = citation_verifier.verify(draft, results, driver=retriever.driver)
+
     print("\n" + "=" * 72)
-    print(synthesize(query, results))
+    print(v["answer"])           # ungrounded citations annotated with ⚠UNVERIFIED
     print("=" * 72)
+    print("\n" + citation_verifier.report(v))
     print("\nSOURCES:")
     for r in results[:10]:
         flag = " ⚠" if r.get("caution_flag") else ""
