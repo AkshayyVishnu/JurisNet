@@ -121,11 +121,12 @@ def _render_sub_questions(
                 if isinstance(chunk, dict):
                     title = chunk.get("title", "Unknown doc")
                     text = chunk.get("text", "")
-                    score = chunk.get("score", 0.0)
+                    # HybridRetriever emits "rrf_score"; accept either key.
+                    score = chunk.get("score") or chunk.get("rrf_score") or 0.0
                 else:
                     title = getattr(chunk, "title", getattr(chunk, "doc_id", "Unknown doc"))
                     text = getattr(chunk, "text", "")
-                    score = getattr(chunk, "score", 0.0)
+                    score = getattr(chunk, "score", None) or getattr(chunk, "rrf_score", 0.0)
                 
                 # Truncate text to keep tokens reasonable while preserving depth
                 preview = text[:1500] + ("..." if len(text) > 1500 else "")

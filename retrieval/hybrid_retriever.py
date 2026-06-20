@@ -64,6 +64,10 @@ class HybridRetriever:
     def __init__(self):
         self.qc = qdrant_store.get_client()
         self.fts = LegalFTS5(str(config.FTS5_DB_PATH))
+        # Ensure the FTS5 table exists even if legal_fts5.db was never built — otherwise
+        # search() raises "no such table: legal_fts" and aborts the whole retrieve().
+        # An empty index just contributes no BM25 hits; vector + graph still answer.
+        self.fts.initialize()
         self.driver = neo4j_store.get_driver()
 
     def close(self):
@@ -92,8 +96,11 @@ class HybridRetriever:
             chunk_map.update({k: v for k, v in cm.items() if k not in chunk_map})
 
         if "bm25" in sources:
-            res = self.fts.search(query, top_k=PER_SOURCE_K)  # has tid, rank, snippet (no text)
-            ranked_lists["bm25"], _ = _collapse(res)
+            try:
+                res = self.fts.search(query, top_k=PER_SOURCE_K)  # tid, rank, snippet (no text)
+                ranked_lists["bm25"], _ = _collapse(res)
+            except Exception as e:  # noqa: BLE001 — a dead/empty BM25 index must not kill retrieval
+                print(f"[HybridRetriever] BM25 source skipped: {e}")
 
         if "citation_graph" in sources:
             seeds = _seed_tids(ranked_lists)

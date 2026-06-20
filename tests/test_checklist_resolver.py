@@ -83,6 +83,34 @@ def _make_provision_dir(provisions: list[dict]) -> str:
     return d
 
 
+def _make_orders_dir(orders: list[dict]) -> str:
+    """Create a temp dir mirroring Orders_Rules/ schema ({doc_id, identifier, text})."""
+    d = tempfile.mkdtemp()
+    for o in orders:
+        fpath = os.path.join(d, f"{o['doc_id']}.json")
+        with open(fpath, "w") as f:
+            json.dump(o, f)
+    return d
+
+
+# Mirrors the real Orders_Rules/ schema: identifier/text (NOT title/body), and the
+# rule text does NOT mention "Code of Civil Procedure" anywhere — so act-verification
+# must be skipped for the orders source.
+ORDER_RULE_PROVISION = {
+    "doc_id": 90001,
+    "identifier": "Order 39 Rule 1",
+    "text": (
+        "1. Cases in which temporary injunction may be granted. - Where in any suit it "
+        "is proved by affidavit or otherwise- (a) that any property in dispute in a suit "
+        "is in danger of being wasted, damaged or alienated by any party to the suit, or "
+        "wrongfully sold in execution of a decree, or (b) that the defendant threatens to "
+        "remove or dispose of his property with a view to defrauding his creditors, the "
+        "Court may by order grant a temporary injunction to restrain such act."
+    ),
+    "cited_by": [],
+}
+
+
 SAMPLE_PROVISION = {
     "doc_id": 55198661,
     "title": "Section 80",
@@ -353,5 +381,55 @@ class TestResolveChecklist:
             assert r2.source == "cache"
             assert r2.checklist[0][0].critical is True
             assert r2.checklist[0][1].critical is False
+        finally:
+            os.unlink(db_path)
+
+
+# ─────────────────────────────────────────────
+# Order/Rule lookup tests (Orders_Rules/ schema: identifier/text)
+# Regression for the bug where Order/Rule provisions were unreachable:
+# wrong directory AND wrong schema keys, so every Order/Rule -> not_found.
+# ─────────────────────────────────────────────
+
+class TestLookupOrderRule:
+    def test_finds_order_rule_from_orders_dir(self):
+        """An Order/Rule provision lives in the orders dir under identifier/text."""
+        orders_dir = _make_orders_dir([ORDER_RULE_PROVISION])
+        data_dir = _make_provision_dir([])  # no sections
+        result = _lookup_provision("Order 39 Rule 1 CPC", data_dir, orders_dir=orders_dir)
+        assert result is not None
+        body, doc_id = result
+        assert doc_id == 90001
+        assert "temporary injunction" in body.lower()
+
+    def test_order_rule_act_phrase_absent_still_matches(self):
+        """Rule text never says 'Code of Civil Procedure' — must still match (CPC implied)."""
+        orders_dir = _make_orders_dir([ORDER_RULE_PROVISION])
+        result = _lookup_provision(
+            "Order 39 Rule 1 of the Code of Civil Procedure",
+            _make_provision_dir([]), orders_dir=orders_dir,
+        )
+        assert result is not None
+
+    def test_order_rule_wrong_rule_returns_none(self):
+        orders_dir = _make_orders_dir([ORDER_RULE_PROVISION])
+        result = _lookup_provision("Order 39 Rule 2 CPC", _make_provision_dir([]), orders_dir=orders_dir)
+        assert result is None
+
+    def test_resolve_checklist_order_rule_end_to_end(self):
+        """resolve_checklist must reach the LLM for an Order/Rule provision (not no-op)."""
+        db_path = _make_temp_db()
+        orders_dir = _make_orders_dir([ORDER_RULE_PROVISION])
+        data_dir = _make_provision_dir([])
+        fake_llm = _make_fake_llm()
+        try:
+            result = resolve_checklist(
+                "Order 39 Rule 1 CPC", llm=fake_llm,
+                db_path=db_path, data_dir=data_dir, orders_dir=orders_dir,
+            )
+            assert result.source == "llm"
+            assert fake_llm.invoke.call_count == 1
+            assert len(result.checklist) == 2
+            assert result.canonical_key == "order_39_rule_1__code_of_civil_procedure"
         finally:
             os.unlink(db_path)

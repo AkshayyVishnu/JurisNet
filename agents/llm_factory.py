@@ -116,14 +116,21 @@ def build_rotating_structured_llm(
     pool = GEMINI_POOL if provider == "gemini" else GROQ_POOL
 
     def client_factory(key: str) -> Any:
+        # max_retries=0: let OUR key-pool rotation be the single retry layer. The langchain
+        # clients otherwise do their own exponential backoff on a 429 (~40s per key before
+        # raising), which makes rotation across an exhausted pool appear to hang.
         if provider == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI
 
-            llm = ChatGoogleGenerativeAI(model=model, google_api_key=key, temperature=temperature)
+            llm = ChatGoogleGenerativeAI(
+                model=model, google_api_key=key, temperature=temperature, max_retries=0
+            )
         else:
             from langchain_groq import ChatGroq
 
-            llm = ChatGroq(model=model, groq_api_key=key, temperature=temperature)
+            llm = ChatGroq(
+                model=model, groq_api_key=key, temperature=temperature, max_retries=0
+            )
         return llm.with_structured_output(schema)
 
     return RotatingStructuredLLM(pool, client_factory, max_attempts=max_attempts, cooldown=cooldown)

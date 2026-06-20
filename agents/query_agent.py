@@ -87,6 +87,12 @@ Do your job in this order:
 
 2. EXTRACT FACTS — pull every concrete fact stated (parties, amounts, dates,
    actions, locations). These become shared context for every sub-question.
+   Write each fact as a COMPLETE statement that keeps the ACTION/EVENT together with
+   its object — do NOT reduce a fact to bare nouns. E.g. for "my partner is selling
+   our disputed plot" extract "the business partner is selling the disputed plot",
+   NOT "business partner" + "disputed plot". The Auditor later checks these facts
+   against statutory conditions, so a dropped verb (sold, demolished, notified, paid)
+   silently breaks verification.
 
 3. DECIDE WHETHER TO CLARIFY. Check these gates in PRIORITY ORDER and surface ONLY
    the single highest-priority issue (ask one question, never several):

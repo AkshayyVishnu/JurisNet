@@ -34,7 +34,13 @@ from .schemas import ChecklistCondition, ChecklistExtraction, ChecklistResult
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB_PATH = str(_REPO_ROOT / "checklist_cache.db")
 _DEFAULT_DATA_DIR = str(_REPO_ROOT / "LEGAL_DATA" / "provisions")
-_DEFAULT_MODEL = "gemini-2.0-flash"
+# Order/Rule provisions live here under a DIFFERENT schema ({doc_id, identifier, text})
+# than LEGAL_DATA/provisions/ ({doc_id, title, body}). Both are scanned by the resolver.
+_DEFAULT_ORDERS_DIR = str(_REPO_ROOT / "Orders_Rules")
+# Default to Groq (12 live keys, rotated). Gemini's free tier is quota-exhausted in
+# practice (429 RESOURCE_EXHAUSTED), so it can't serve the one-shot extraction reliably.
+# Still overridable via $CHECKLIST_MODEL (e.g. a gemini-* value once quota resets).
+_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 # Act name → abbreviation map (shared with chunker's _generate_statute_aliases)
 _ACT_ABBREVS: dict[str, list[str]] = {
@@ -233,24 +239,73 @@ def _cache_put(conn: sqlite3.Connection, result: ChecklistResult) -> None:
 # Provision document lookup
 # ─────────────────────────────────────────────
 
-def _lookup_provision(provision_key: str, data_dir: str) -> tuple[str, int] | None:
+def _order_rule_id(text: str) -> str | None:
     """
-    Scan LEGAL_DATA/provisions/*.json to find the matching provision.
-
-    Match strategy:
-      1. Extract section/article number from provision_key
-      2. For each JSON file, check if `title` contains that number
-      3. Verify the act name appears in the `body` field
-      4. Also check chunker-generated aliases
-
-    Returns (body_text, doc_id) or None if not found.
+    Normalized order/rule identifier for matching, e.g. "order_39_rule_1" or "order_7".
+    None if the text has no Order/Rule reference. Used to match a query against the
+    Orders_Rules/ `identifier` field (arabic numerals, e.g. "Order 39 Rule 1").
     """
+    m = _ORDER_RULE_RE.search(text)
+    if m:
+        return f"order_{m.group(1).lower()}_rule_{m.group(2).lower()}"
+    m = _ORDER_RE.search(text)
+    if m:
+        return f"order_{m.group(1).lower()}"
+    return None
+
+
+def _scan_orders_dir(orders_dir: str, or_id: str) -> tuple[str, int] | None:
+    """
+    Find an Order/Rule provision in Orders_Rules/ (schema {doc_id, identifier, text}).
+    Matches by normalized order/rule id. The act (CPC) is IMPLIED for civil orders, so
+    no act-verification is done — the rule text itself rarely names the Code.
+    """
+    if not os.path.isdir(orders_dir):
+        return None
+    for fname in sorted(os.listdir(orders_dir)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(orders_dir, fname), encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        ident = data.get("identifier") or data.get("title") or ""
+        if _order_rule_id(ident.lower()) == or_id:
+            body = data.get("text") or data.get("body") or ""
+            if body.strip():
+                return body, data.get("doc_id", 0)
+    return None
+
+
+def _lookup_provision(
+    provision_key: str, data_dir: str, orders_dir: str | None = None
+) -> tuple[str, int] | None:
+    """
+    Find the matching provision text + doc_id across two corpora:
+
+      • Orders_Rules/ for Order/Rule provisions (schema {doc_id, identifier, text}).
+      • LEGAL_DATA/provisions/ for Section/Article provisions (schema {doc_id, title, body}).
+
+    Sections/Articles: extract the number from the key, find a doc whose `title` carries
+    it, and verify the act name appears in `body`. Orders/Rules: normalized order/rule
+    id equality against `identifier` (CPC implied, no act check).
+
+    Returns (provision_text, doc_id) or None if not found.
+    """
+    key_lower = provision_key.lower().strip()
+
+    # 1) Order/Rule lookup (only when the key actually references an Order/Rule).
+    or_id = _order_rule_id(key_lower)
+    if or_id and orders_dir:
+        hit = _scan_orders_dir(orders_dir, or_id)
+        if hit is not None:
+            return hit
+
+    # 2) Section/Article lookup in the provisions corpus.
     if not os.path.isdir(data_dir):
         return None
 
-    key_lower = provision_key.lower().strip()
-
-    # Extract what we're looking for
     section_num = None
     m = _SECTION_RE.search(key_lower)
     if m:
@@ -259,16 +314,7 @@ def _lookup_provision(provision_key: str, data_dir: str) -> tuple[str, int] | No
     m = _ARTICLE_RE.search(key_lower)
     if m:
         article_num = m.group(1).replace(" ", "")
-    order_num = None
-    m = _ORDER_RE.search(key_lower)
-    if m:
-        order_num = m.group(1)
-    rule_num = None
-    m = _RULE_RE.search(key_lower)
-    if m:
-        rule_num = m.group(1)
 
-    # Extract act name from the provision key
     act_name = _extract_act_name(provision_key)
 
     for fname in os.listdir(data_dir):
@@ -286,26 +332,18 @@ def _lookup_provision(provision_key: str, data_dir: str) -> tuple[str, int] | No
         title_lower = title.lower()
         body_lower = body.lower()
 
-        # Check title matches the section/article number
         title_match = False
         if section_num and re.search(rf'\bsection\s+{re.escape(section_num)}\b', title_lower):
             title_match = True
         elif article_num and re.search(rf'\barticle\s+{re.escape(article_num)}\b', title_lower):
             title_match = True
-        # For Order X Rule Y, the title is often just "Rule Y" or "Order X Rule Y"
-        elif order_num and rule_num:
-            if (re.search(rf'\border\s+{re.escape(order_num)}\b', title_lower + " " + body_lower[:200])
-                    and re.search(rf'\brule\s+{re.escape(rule_num)}\b', title_lower + " " + body_lower[:200])):
-                title_match = True
 
         if not title_match:
             continue
 
-        # If we know which act, verify it appears in the body
+        # If we know which act, verify it appears in the body.
         if act_name:
             act_found = False
-            # The body text typically starts with "Section X in The [Act Name], [Year]"
-            # Check both the full name and abbreviations
             candidates = [act_name.lower()]
             if act_name.lower() in _ACT_ABBREVS:
                 candidates.extend(a.lower() for a in _ACT_ABBREVS[act_name.lower()])
@@ -400,6 +438,7 @@ def resolve_checklist(
     llm: Any = None,
     db_path: str | None = None,
     data_dir: str | None = None,
+    orders_dir: str | None = None,
     model: str | None = None,
 ) -> ChecklistResult:
     """
@@ -430,6 +469,7 @@ def resolve_checklist(
     canonical = _canonicalize(provision_key)
     db_path = db_path or _DEFAULT_DB_PATH
     data_dir = data_dir or _DEFAULT_DATA_DIR
+    orders_dir = orders_dir or _DEFAULT_ORDERS_DIR
 
     # Cache check
     conn = _init_cache(db_path)
@@ -441,7 +481,7 @@ def resolve_checklist(
             return cached
 
         # Cache miss — look up the provision document
-        lookup = _lookup_provision(provision_key, data_dir)
+        lookup = _lookup_provision(provision_key, data_dir, orders_dir=orders_dir)
         if lookup is None:
             return ChecklistResult(
                 provision_key=provision_key,

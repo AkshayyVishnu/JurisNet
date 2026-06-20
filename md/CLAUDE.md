@@ -4,7 +4,7 @@
 > Update this file whenever architecture, conventions, schemas, or build status change.
 > Do this proactively at the end of any session where something material changed —
 > don't wait to be asked. Keep sections current rather than appending a changelog.
-> Last updated: 2026-06-20
+> Last updated: 2026-06-21
 
 ## 1. What this project is
 
@@ -200,6 +200,13 @@ default `function_calling` method.
   attaches one shared `SharedContext` (original query + extracted facts) to every
   sub-question, assigns 1-based ids, and preserves `relationship_type` + `depends_on`.
   A visible `reformulated_query` field keeps reformulation a distinct step.
+- **Facts are extracted as complete, action-preserving statements (fixed 2026-06-21).**
+  The prompt/schema require each fact to keep its verb/event with its object (e.g.
+  "the business partner is selling the disputed plot"), not bare entity labels
+  ("business partner", "plot"). A dropped action silently breaks the Auditor (it can't
+  match the fact to a statutory condition and re-asks something the user already stated).
+  Live-verified: with the fix, "…partner selling our disputed plot…" flows through to a
+  satisfied Order 39 Rule 1 condition → determination `applies`, no needless ❓.
 - **Injectable LLM** (`run_query_agent(..., llm=...)`) so the assembly logic can be
   driven by a fake without a key. Verified end-to-end against real Groq via the
   interactive CLI (`main.py`): simple / compound-split / vague / ambiguous /
@@ -262,8 +269,12 @@ default `function_calling` method.
    on the offline layer during iteration, demo on a fresh budget, or upgrade tier.
    The model is overridable via the `QUERY_AGENT_MODEL` env var (no code change) —
    temporarily point at another Groq model with a separate budget, then clear it to
-   revert to `DEFAULT_MODEL` (`llama-3.3-70b-versatile`). As of 2026-06-20 it is
-   temporarily set to `openai/gpt-oss-20b` (NOT yet live-verified for the schema).
+   revert to `DEFAULT_MODEL` (`llama-3.3-70b-versatile`). **`openai/gpt-oss-20b` was
+   live-tested 2026-06-21 and FAILED** — it emits `null` for array fields
+   (`depends_on`/`known_facts`), which Groq rejects *server-side* (400 tool-call
+   validation) before our null→[] coercion runs, and it hallucinates wrong provision
+   keys. `.env` reverted to `llama-3.3-70b-versatile` (12 Groq keys rotate, so budget
+   is ample). Mitigation for the daily cap now leans on key rotation, not a weaker model.
 
 ## 4. Tech stack & model selection
 
@@ -274,6 +285,10 @@ default `function_calling` method.
   structured LLM through `agents/llm_factory.build_rotating_structured_llm`, so a 429 on one key
   rolls to the next and the effective daily budget is N× a single key (§3 risk 4). Gemini keys
   (`GOOGLE_API_KEY*`, `GEMINI_POOL`) rotate identically — a `gemini-*` model id routes there.
+  The factory builds each langchain client with `max_retries=0` so a 429 surfaces immediately
+  and OUR pool rotation is the single retry layer (otherwise langchain's own exponential backoff
+  stalls ~40s per key, making rotation across an exhausted pool look hung). Practical note: the
+  Gemini free tier is currently quota-exhausted, so Groq serves all four LLM agents.
 - **Structured output:** Pydantic models + `.with_structured_output(...)` for every agent that emits JSON
 - **Env/secrets:** `.env` + `python-dotenv`
 - **Package/env management:** `uv` — always `uv run <file>.py` / `uv add <package>`, never bare `pip`/`python`
@@ -383,7 +398,7 @@ class State(TypedDict):
 | Query Agent | 🤖 Agent | ✅ Done — `agents/query_agent.py`, `agents/schemas.py`; clarify/resume loop with don't-know + 2-ask-cap handling (PART 1) and `unknown_fields` tracking. Per-sub-question `query_type` classification (`test_application` / `informational`) drives downstream pipeline routing; `provision_key` (statute OR case-law doctrine) seeds Checklist Resolver lookup. Scripted suite `tests/test_query_agent.py` (A–F). Entry `run_query_agent(...)` + `main.py` CLI; wraps cleanly for LangGraph | `llama-3.3-70b-versatile` (8B failed re-test, see §2b) |
 | Researcher (Pull A/B) | ⚙️ Module | ✅ Done — Integrated with teammate's `HybridRetriever` inside `agents/researcher.py` | n/a (calls teammate's functions) |
 | Researcher (Pull C) | ⚙️ Module | ✅ Done — Regex extraction matching civil sections/orders/rules with context-title act fallback. Offline suite `tests/test_researcher.py` passed. | no LLM |
-| Checklist Resolver | ⚙️ Module | ✅ Done — `agents/checklist_resolver.py`. Cache-backed module. Looks up provision from JSONs, caches mechanically by canonical key, falls back to one Gemini structured call on miss (grounded in the provision text). Returns `list[list[str]]` of grouped conditions. Demo via `demo_checklist.py`. | `gemini-2.0-flash` (separate budget) |
+| Checklist Resolver | ⚙️ Module | ✅ Done — `agents/checklist_resolver.py`. Cache-backed module. Looks up provision from JSONs across BOTH corpora — `LEGAL_DATA/provisions/` (Sections/Articles, schema `title`/`body`) AND `Orders_Rules/` (Order/Rule provisions, schema `identifier`/`text`; CPC implied, no act-check). Caches mechanically by canonical key; one structured LLM call on miss (grounded in provision text). Returns grouped `ChecklistCondition`s. Live-verified on Sections (e.g. S.11 res judicata) + Orders/Rules (e.g. O.39 R.1 injunction → alt-group). Suite `tests/test_checklist_resolver.py` (29, incl. Order/Rule regression). | `llama-3.3-70b-versatile` (Groq, rotated) — moved off `gemini-2.0-flash` (free-tier quota exhausted; overridable via `$CHECKLIST_MODEL`) |
 | Auditor | 🤖 Agent | ✅ Done — `agents/auditor.py` (+ shared `agents/llm_factory.py`). Verifies each checklist condition vs known facts (✅/❌/❓); **code** owns the CRITICAL/optional + alternative-group determination math and the clarify/resume loop (don't-know + 2-ask cap, mirrors Query Agent). Builds its structured LLM via the rotating key pools (`build_rotating_structured_llm`): Groq by default, a `gemini-*` override routes to the Gemini pool; a 429 rolls to the next key. Offline suite `tests/test_auditor.py` (31) + factory suite `tests/test_llm_factory.py` (15); live smoke verified. | `llama-3.3-70b-versatile` (rotated across `GROQ_POOL`; was `deepseek-r1-distill-llama-70b` — see §4 note) |
 | Adjudicator | 🤖 Agent | ✅ Done — `agents/adjudicator.py`. Synthesizes final legal answer, citations, options, and procedural vs substantive conflicts. Offline suite `tests/test_adjudicator.py` + live smoke verified. | `llama-3.3-70b-versatile` (rotated across `GROQ_POOL`) |
-| Graph wiring (LangGraph) | — | ⬜ Not started — prototype chatbot validated the pattern, real graph not yet built | n/a |
+| Graph wiring (LangGraph) | — | ✅ Done — `agents/graph.py` (`build_graph`) + `run_pipeline.py` CLI. `StateGraph` wires all 5 components; sub-questions processed sequentially via a `current_index` cursor; per-sub-question routing on `recommended_pipeline` (full vs short). The Query Agent clarification gate and the Auditor ❓ loop are native LangGraph `interrupt()`s resumed with `Command(resume=...)`, with a `MemorySaver` checkpointer (each clarifying node self-loops, one interrupt per invocation). One shared retriever injected; falls back to a null retriever (empty retrieval) when the RAG stores are down. Live-verified end-to-end: full path (applies/indeterminate), Auditor interrupt+resume, and short/informational path. | n/a (`langgraph==1.2.6`) |

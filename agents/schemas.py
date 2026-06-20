@@ -141,7 +141,11 @@ class SubQuestionDraft(BaseModel):
     )
     known_facts: List[str] = Field(
         default_factory=list,
-        description="Facts from the user's query that are specifically relevant to THIS sub-question.",
+        description=(
+            "Facts from the user's query specifically relevant to THIS sub-question, "
+            "each as a COMPLETE statement preserving the action/event (e.g. 'the "
+            "business partner is selling the disputed plot'), not a bare entity label."
+        ),
     )
 
     # Groq (esp. the smaller Llama models) sometimes emits `null` for an array field
@@ -173,7 +177,15 @@ class QueryAnalysis(BaseModel):
         description=(
             "All concrete facts present in the user's input, extracted before any "
             "split (parties, amounts, dates, actions, locations). These travel with "
-            "every sub-question as shared context. Empty list if none stated."
+            "every sub-question as shared context. "
+            "CRITICAL: write each fact as a COMPLETE statement that preserves the "
+            "ACTION/EVENT and its object — never reduce it to a bare entity label. "
+            "E.g. for 'my business partner is selling our disputed plot', extract "
+            "['the business partner is selling the disputed plot'], NOT "
+            "['business partner', 'disputed plot']. The downstream Auditor verifies "
+            "these facts against statutory conditions, so a dropped verb (sold, "
+            "demolished, notified, paid) silently breaks verification. "
+            "Empty list if none stated."
         ),
     )
     needs_clarification: bool = Field(
