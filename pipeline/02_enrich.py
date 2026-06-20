@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 import threading
 import time
@@ -69,6 +70,11 @@ Return ONLY a JSON object with these exact keys:
 }}
 
 Rules:
+- holding_para_ids is REQUIRED and must be NON-EMPTY whenever the judgment contains
+  any reasoning or a decision (i.e. almost always — if you were able to state a
+  ratio, you MUST identify the paragraph id(s) it came from). List the id(s) of the
+  paragraph(s) that state or directly support the court's holding/decision. Leave it
+  empty ONLY for a pure procedural order with no reasoning at all (extremely rare).
 - holding_para_ids MUST be a subset of the paragraph ids actually shown below. Keep it TIGHT (only the genuine holding paragraphs).
 - Do not invent facts. Base everything strictly on the text.
 
@@ -102,7 +108,7 @@ def _complete(model: str, key: str, prompt: str) -> dict:
         api_key=key,
         temperature=0.1,
         response_format={"type": "json_object"},
-        max_tokens=2500,  # truncated reasoning budget for gpt-oss + JSON output (faster)
+        max_tokens=5000,  # reasoning models (gpt-oss) need headroom for thinking + JSON
     )
     content = r.choices[0].message.content
     if not content:
@@ -230,7 +236,27 @@ def enrich_chunk(chunk: dict) -> dict:
     facts = (out.get("facts_summary") or "").strip()
     ratio = (out.get("ratio") or "").strip()
     disposition = (out.get("disposition") or "").strip().upper()
-    holding_ids = [str(p) for p in out.get("holding_para_ids", []) if str(p) in para_ids]
+    # Resolve the model's holding ids to our para_ids. Three mismatches to bridge:
+    #  1. decoration: model echoes "[32.]" / "32." -> strip to "32"
+    #  2. size-splits: base "32" -> chunks "32.0", "32.1"
+    #  3. native-number drift: when a big paragraph was sub-split, our ids ("8.15")
+    #     diverge from the document's inline paragraph numbers ("32.") the model reads;
+    #     map via the leading number in each chunk's raw text.
+    def _norm_pid(p: object) -> str:
+        return str(p).strip().strip("[]").strip().rstrip(".").strip()
+    inline_map: dict[str, str] = {}
+    for c in paras:
+        mm = re.match(r"\s*(\d+[A-Z]?)\.", c.get("raw", ""))
+        if mm:
+            inline_map.setdefault(mm.group(1), c["para_id"])
+    holding_ids: list[str] = []
+    for p in out.get("holding_para_ids", []):
+        n = _norm_pid(p)
+        matched = [pid for pid in para_ids if pid == n or pid.split(".")[0] == n]
+        if not matched and n in inline_map:
+            matched = [inline_map[n]]
+        holding_ids += matched
+    holding_ids = list(dict.fromkeys(holding_ids))
 
     # ── L0: replace metadata text with headnote, keep the "Cites:" tail ──
     old = l0.get("text", "")
@@ -274,13 +300,18 @@ def enrich_chunk(chunk: dict) -> dict:
     return chunk
 
 
-def run(limit: int | None, dry: bool, workers: int) -> None:
+def run(limit: int | None, dry: bool, workers: int, only_missing_l3: bool = False) -> None:
     config.validate(require_agent_keys=True)
     files = sorted(config.CHUNKS_JUDGMENTS_DIR.glob("*.json"))
     todo = []
     for f in files:
         d = json.loads(f.read_text(encoding="utf-8"), strict=False)
-        if not d.get("stage_b_done"):
+        if only_missing_l3:
+            # Re-enrich already-done docs that ended up with no L3 (empty
+            # holding_para_ids) to lift L3 coverage — leaves the rest untouched.
+            if d.get("stage_b_done") and not d.get("l3_atomic"):
+                todo.append((f, d))
+        elif not d.get("stage_b_done"):
             todo.append((f, d))
     if limit:
         todo = todo[:limit]
@@ -307,8 +338,12 @@ def run(limit: int | None, dry: bool, workers: int) -> None:
         """Enrich + write one doc. Returns (item, error_or_None) so failures re-queue."""
         f, d = item
         try:
-            d = enrich_chunk(d)
-            f.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
+            new = enrich_chunk(json.loads(json.dumps(d)))  # work on a copy
+            # In L3-recovery mode, only overwrite if we actually recovered L3 —
+            # otherwise keep the original doc untouched (no regression of good fields).
+            if only_missing_l3 and not new.get("l3_atomic"):
+                return item, None
+            f.write_text(json.dumps(new, indent=2, ensure_ascii=False), encoding="utf-8")
             return item, None
         except Exception as e:  # noqa: BLE001 — re-queued for a later round
             return item, e
@@ -385,5 +420,7 @@ if __name__ == "__main__":
     ap.add_argument("--limit", type=int, default=None, help="process at most N judgments")
     ap.add_argument("--dry", action="store_true", help="print results, do not write")
     ap.add_argument("--workers", type=int, default=5, help="concurrent workers (default 5)")
+    ap.add_argument("--only-missing-l3", action="store_true",
+                    help="re-enrich already-done docs that have no L3 (lift L3 coverage)")
     args = ap.parse_args()
-    run(args.limit, args.dry, args.workers)
+    run(args.limit, args.dry, args.workers, args.only_missing_l3)
