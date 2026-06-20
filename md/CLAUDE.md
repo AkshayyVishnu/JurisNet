@@ -334,7 +334,7 @@ class State(TypedDict):
                                          # known_facts, shared_context)
     evidence_pool: list[Chunk]          # Researcher output (Pulls A+B combined)
     surfaced_statutes: list[str]        # Pull C output
-    checklist: list[str]                # Checklist Resolver output
+    checklist: list[list[str]]          # Checklist Resolver output (grouped conditions)
     audit_result: dict                  # Auditor's ✅/❌/❓ buckets
     pending_question: str | None        # set when Query Agent or Auditor needs the user
 ```
@@ -370,7 +370,7 @@ class State(TypedDict):
 | Query Agent | 🤖 Agent | ✅ Done — `agents/query_agent.py`, `agents/schemas.py`; clarify/resume loop with don't-know + 2-ask-cap handling (PART 1) and `unknown_fields` tracking. Per-sub-question `query_type` classification (`test_application` / `informational`) drives downstream pipeline routing; `provision_key` (statute OR case-law doctrine) seeds Checklist Resolver lookup. Scripted suite `tests/test_query_agent.py` (A–F). Entry `run_query_agent(...)` + `main.py` CLI; wraps cleanly for LangGraph | `llama-3.3-70b-versatile` (8B failed re-test, see §2b) |
 | Researcher (Pull A/B) | ⚙️ Module | ⬜ Not started — blocked on teammate's RAG interface | n/a (calls teammate's functions) |
 | Researcher (Pull C) | ⚙️ Module | ⬜ Not started — regex extraction, independent, can build anytime | no LLM |
-| Checklist Resolver | ⚙️ Module | ⬜ Not started | `llama-3.3-70b-versatile` |
+| Checklist Resolver | ⚙️ Module | ✅ Done — `agents/checklist_resolver.py`. Cache-backed module. Looks up provision from JSONs, caches mechanically by canonical key, falls back to one Gemini structured call on miss (grounded in the provision text). Returns `list[list[str]]` of grouped conditions. Demo via `demo_checklist.py`. | `gemini-2.0-flash` (separate budget) |
 | Auditor | 🤖 Agent | ⬜ Not started | `deepseek-r1-distill-llama-70b` |
 | Adjudicator | 🤖 Agent | ⬜ Not started | `llama-3.3-70b-versatile` |
 | Graph wiring (LangGraph) | — | ⬜ Not started — prototype chatbot validated the pattern, real graph not yet built | n/a |

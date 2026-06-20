@@ -285,3 +285,102 @@ class QueryAgentResult(BaseModel):
     @property
     def is_ready(self) -> bool:
         return self.status == "ready"
+
+
+# ─────────────────────────────────────────────
+# Checklist Resolver schemas (CLAUDE.md §2, §7)
+# ─────────────────────────────────────────────
+
+class ChecklistCondition(BaseModel):
+    """A single extractable condition from a legal provision."""
+    text: str = Field(
+        description=(
+            "A single, self-contained, verifiable legal condition. "
+            "Extract ONLY from the provision text provided."
+        )
+    )
+    critical: bool = Field(
+        description=(
+            "true ONLY if failing this specific condition means the "
+            "provision cannot apply AT ALL — no court could excuse it. "
+            "If the statute text elsewhere states that defects in this "
+            "condition are excused, cured, or not grounds for dismissal "
+            '(e.g., "shall not be dismissed merely by reason of..."), '
+            "mark this condition false, even though it may be phrased "
+            'as mandatory ("shall").'
+        )
+    )
+    alternative_group: Optional[str] = Field(
+        default=None,
+        description=(
+            "If this condition is one of several alternatives where "
+            "satisfying ANY ONE is sufficient (e.g. 'if X is tendered, "
+            "OR if proof of Y is given'), assign all alternatives in "
+            "the same set the SAME tag string (e.g. 'stoppage_alternatives'). "
+            "null if the condition is standalone (not part of an OR group)."
+        )
+    )
+
+
+class ChecklistGroup(BaseModel):
+    """A group of related conditions from one part of a legal provision."""
+    group_label: str = Field(
+        description=(
+            "A short label for this group of conditions, e.g. "
+            "'Sub-section (1) requirements', 'Proviso conditions', "
+            "'General conditions'. Use the sub-section reference from "
+            "the provision text when available."
+        )
+    )
+    conditions: List[ChecklistCondition] = Field(
+        description=(
+            "Each condition as a ChecklistCondition with text and "
+            "critical flag. Extract ONLY from the provision text."
+        )
+    )
+    applies_only_if: Optional[str] = Field(
+        default=None,
+        description=(
+            "If this entire group of conditions only applies under a "
+            "specific factual precondition (e.g. 'plaintiff is claiming "
+            "urgent or immediate relief', 'sale is adjourned for more "
+            "than thirty days'), state that precondition here. The "
+            "Auditor must check this gating condition FIRST before "
+            "evaluating any conditions in this group. null if the group "
+            "applies unconditionally."
+        )
+    )
+
+
+class ChecklistExtraction(BaseModel):
+    """
+    LLM-facing schema: structured extraction of a checklist from a
+    provision's text. Bound to .with_structured_output(...).
+    """
+    provision_name: str = Field(
+        description="The name/reference of the provision being analyzed."
+    )
+    groups: List[ChecklistGroup] = Field(
+        description=(
+            "Groups of related conditions extracted from the provision. "
+            "Group by sub-section, clause, or logical category. Each group "
+            "has a label and a list of ChecklistCondition objects."
+        )
+    )
+
+
+class ChecklistResult(BaseModel):
+    """
+    Public output of the Checklist Resolver for one provision.
+
+    checklist is list[list[ChecklistCondition]] — each inner list is a
+    group of related conditions. group_labels[i] names checklist[i].
+    """
+    provision_key: str = ""           # Original key as passed in
+    canonical_key: str = ""           # Normalized cache key
+    checklist: List[List[ChecklistCondition]] = Field(default_factory=list)
+    group_labels: List[str] = Field(default_factory=list)
+    group_gates: List[Optional[str]] = Field(default_factory=list)  # applies_only_if per group
+    source: str = ""                  # "cache" | "llm" | "not_found"
+    provision_text_snippet: str = ""  # First ~200 chars of matched doc (debug)
+

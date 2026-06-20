@@ -17,4 +17,6 @@ Thumbs.db
 
 # Claude Code local state
 .claude/
-.claude/
+
+# Caches
+checklist_cache.db
