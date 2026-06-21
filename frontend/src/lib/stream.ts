@@ -2,12 +2,12 @@ import { API } from "./api";
 
 export type SSEHandler = (event: string, data: any) => void;
 
-/** POST /api/ask and parse the SSE stream (fetch + ReadableStream; EventSource is GET-only). */
-export async function streamAsk(query: string, onEvent: SSEHandler, signal?: AbortSignal) {
-  const resp = await fetch(`${API}/api/ask`, {
+/** POST a JSON body and parse the SSE stream (fetch + ReadableStream; EventSource is GET-only). */
+export async function streamSSE(path: string, body: any, onEvent: SSEHandler, signal?: AbortSignal) {
+  const resp = await fetch(`${API}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!resp.ok || !resp.body) throw new Error(`backend ${resp.status}`);
@@ -20,7 +20,6 @@ export async function streamAsk(query: string, onEvent: SSEHandler, signal?: Abo
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
-
     const frames = buf.split("\n\n");
     buf = frames.pop() ?? "";
     for (const frame of frames) {

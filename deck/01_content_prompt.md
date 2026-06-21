@@ -85,7 +85,7 @@ SLIDE OUTLINE (follow this order; ≤20):
 2  The problem — production agentic RAG + contextual fidelity under stress + real utility; the
    hallucinated-citation stakes (Mata v. Avianca)
 3  Why vanilla RAG fails for law
-4  JurisNet — solution overview (Diagram A)
+4    (Diagram A)
 5  Domain & corpus (1,071 docs; civil/CPC; why a curated legal corpus matters)
 6  Legal-aware multi-level chunking (Diagram C)
 7  Hybrid retrieval → RRF, 4 sources (Diagram B)

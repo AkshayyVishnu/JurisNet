@@ -74,14 +74,17 @@ class HybridRetriever:
         self.fts.close()
         self.driver.close()
 
-    def retrieve(self, query: str, intent: str = "DEFAULT", top_k: int = 20) -> list[dict]:
+    def retrieve(self, query: str, intent: str = "DEFAULT", top_k: int = 20,
+                 force_sources: list[str] | None = None) -> list[dict]:
         plan = embed_query(
             query, intent,
             mode=config.QUERY_EMBED_MODE,
             voyage_api_key=config.VOYAGE_API_KEY,
             truncate_dim=config.EMBED_DIM,
         )
-        sources = plan.search_sources
+        # force_sources lets the eval ablate the retriever (e.g. dense-only "vanilla"
+        # vs +bm25 vs +graph) for an honest, measured comparison matrix.
+        sources = list(force_sources) if force_sources is not None else plan.search_sources
         ranked_lists: dict[str, list[dict]] = {}
         chunk_map: dict[int, dict] = {}
 
