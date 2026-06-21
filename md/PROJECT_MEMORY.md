@@ -549,4 +549,26 @@ python query_embedder.py
 - **Next step**: Wire the 3 LLM TODO calls in chunker.py, then build embedding pipeline + store writes
 
 ---
+
+## 🔬 Research Reports (Session 2 — June 20, 2026)
+
+Two standalone research reports written this session (kept out of this file to avoid bloat):
+
+### `RESEARCH_GraphRAG_Search_Agents.md` — Local/Global/DRIFT search
+- **Finding**: Neo4j graph is used in only 1 of 3 GraphRAG modes. Current Citation Graph Traversal ≈ **Local Search**. Missing **Global Search** (corpus-wide doctrine synthesis) and **DRIFT** (breadth+depth for ARGUMENTATIVE queries).
+- **Missing primitive**: community detection (Leiden) + per-community LLM summaries ("doctrinal digests"). Cheap here because edges are free (IK `citedby` + citation extraction) — skip the expensive LLM edge-extraction step.
+- **New agents proposed**: Community Report Builder (offline), Global Synthesis Agent (Tier 2), DRIFT Orchestrator (routed from ARGUMENTATIVE), Search-Mode Router (extend Query Understanding → LOCAL/GLOBAL/DRIFT).
+- **Build order**: Community Report Builder → router → Global Synthesis → DRIFT.
+
+### `RESEARCH_Optimization_Gap_Analysis.md` — gaps vs 2025–2026 papers
+Ranked optimizations NOT yet in the plan:
+1. **Adaptive retrieval depth** (HIGH) — replace fixed 12-step ReAct budget with confidence-gated stop (reuse Reflection + Groundedness critics). Cheap prompt-level version of Search-R1.
+2. **Claim/span-level attribution + abstention gate** (HIGH) — biggest risk gap. Current verifier checks cases exist; upgrade to per-claim→span matching + refuse-when-unsupported (Stanford 2025: legal RAG still fabricates citations). L3 atomic chunks already support this.
+3. **Legal-specific eval** (HIGH) — add IL-TUR, LRAGE, "Are LLMs Court-Ready?" alongside ragas.
+4. **Late-interaction (ColBERT) reranker** (MED) — token-level MaxSim over top-50, not a full index.
+5. **Query augmentation for Indian legal** (MED) — AQgR shows it helps Indian retrieval; fold into DRIFT follow-ups, do NOT add standalone rewriter.
+6. **Verify late-chunking is actually wired** (MED) — voyage-4-large "+20.54%" only holds if indexer passes document context, not bare chunks. Cheap correctness check.
+- **DON'T add**: standalone Query Rewriter, ColPali/visual retrieval, full ColBERT index, RL retrieval training (before heuristic adaptive-depth is exhausted).
+
+---
 *Update this file at every meaningful milestone.*
